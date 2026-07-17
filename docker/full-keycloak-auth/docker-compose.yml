@@ -1,0 +1,237 @@
+# complete docker compose with geovisio backend, a database, some pictures workers and keycloak based authentication
+# * All is accessible through http://localhost:8080 (using a reverse proxy to dispatch to all services)
+#
+# Some key variables can be changed by providing a `.env` file or environment variables to docker compose
+# and feel free to change more configuration directly in this file if needed.
+#
+# Since this is aimed at serving an identity provider alongside goevisio, this MUST be run behind a proxy handling TLS
+# and served on a domain defined in the `.env` file as DOMAIN
+#
+# Note: if the port 8080 is alreay binded on your system, change it in this file
+
+x-base-geovisio: &geovisio-default
+  image: panoramax/api:${GEOVISIO_IMAGE_TAG:-latest}
+
+services:
+  auth:
+    build:
+      context: .
+      dockerfile: Dockerfile.keycloak
+    command: start --optimized --import-realm
+    labels:
+      - "traefik.enable=false"
+    environment:
+      # Placeholders in keycloak-realm.json
+      GEOVISIO_BASE_URL: https://${DOMAIN}
+      GEOVISIO_CLIENT_SECRET: ${OAUTH_CLIENT_SECRET}
+
+      # Keycloak admin account
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:-admin}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+
+      # Database connection
+      # note: keycloak uses the same database as geovisio, in a separate schema, this way there is only 1 database to backup
+      KC_DB_USERNAME: keycloak_user
+      KC_DB_PASSWORD: ${KC_DB_PASSWORD}
+      KC_DB_SCHEMA: keycloak
+      KC_DB_URL: jdbc:postgresql://db/geovisio
+
+      # Tell keycloak to trust nginx X-Forwarded headers
+      KC_PROXY_HEADERS: xforwarded
+      # It's fine to use http, the reverse proxy handle the tls termination
+      KC_HTTP_ENABLED: true
+      # trust nginx to set the correct xforwarded headers with the hostname
+      KC_HOSTNAME_STRICT: false
+      # Enable health endpoint on management port (9000) at /health/ready
+      KC_HTTP_MANAGEMENT_HEALTH_ENABLED: "true"
+
+      # SMTP for email verification
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_FROM: ${SMTP_FROM}
+      SMTP_FROM_DISPLAY_NAME: ${SMTP_FROM_DISPLAY_NAME:-Panoramax}
+      SMTP_SSL: ${SMTP_SSL:-false}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASSWORD: ${SMTP_PASSWORD}
+
+      # tell keycloak that it will be /oauth prefix by nginx
+      KC_HOSTNAME_PATH: /oauth
+      # KEYCLOAK_TEMPLATES_DIR: ./themes/ # you can load theme if you want
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      # Health endpoints are not reliably available in this Keycloak 26 build.
+      # The master realm endpoint is a solid readiness signal: it proves the DB is up,
+      # the realm is loaded, and Keycloak is serving requests.
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8080; printf 'GET /oauth/realms/master HTTP/1.0\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3; timeout 3 grep -m1 'HTTP/1.0 200' <&3"]
+      timeout: 5s
+      interval: 5s
+      retries: 5
+      start_period: 60s
+  migrations:
+    <<: *geovisio-default
+    command: db-upgrade
+    restart: "no"
+    exclude_from_hc: true
+    environment:
+      DB_URL: postgres://gvs:${PG_PASSWORD}@db/geovisio
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    <<: *geovisio-default
+    command: ssl-api
+    labels:
+      - "traefik.enable=false"
+    depends_on:
+      db:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    environment:
+      OAUTH_PROVIDER: oidc
+      OAUTH_CLIENT_ID: geovisio
+      OAUTH_CLIENT_SECRET: ${OAUTH_CLIENT_SECRET}
+      OAUTH_OIDC_URL: https://${DOMAIN}/oauth/realms/geovisio
+      DB_URL: postgres://gvs:${PG_PASSWORD}@db/geovisio
+      FLASK_SECRET_KEY: ${FLASK_SECRET_KEY}
+      FLASK_SESSION_COOKIE_DOMAIN: ${DOMAIN:-localhost}
+      API_FORCE_AUTH_ON_UPLOAD: True
+      API_PICTURES_LICENSE_SPDX_ID: CC-BY-SA-4.0 # default pictures's license, change it if needed
+      API_PICTURES_LICENSE_URL: https://spdx.org/licenses/CC-BY-SA-4.0.html
+      API_BLUR_URL: ${BLUR_API:-https://blur.panoramax.openstreetmap.fr}
+      API_DERIVATES_PICTURES_PUBLIC_URL: ${S3_DERIVATES_PUBLIC_URL}
+      API_PERMANENT_PICTURES_PUBLIC_URL: ${S3_PERMANENT_PUBLIC_URL}
+      PICTURE_PROCESS_THREADS_LIMIT: 0
+      PICTURE_PROCESS_DERIVATES_STRATEGY: PREPROCESS
+      FS_TMP_URL: ${FS_TMP_URL}
+      FS_PERMANENT_URL: ${FS_PERMANENT_URL}
+      FS_DERIVATES_URL: ${FS_DERIVATES_URL}
+      NB_API_THREADS: 10
+      # Default 2: Traefik (Coolify) + nginx (reverseproxy) both set X-Forwarded-For before reaching the API
+      INFRA_NB_PROXIES: ${INFRA_NB_PROXIES:-2}
+      # API SUMMARY regroup many metadata about the instance
+      # check the documentation on how translations are handled: https://docs.panoramax.fr/backend/install/settings/#metadata
+      API_SUMMARY: >-
+        {
+          "color": "#abcdef",
+          "description": {"en": "a long description", "fr": "une description longue"},
+          "logo": "https://gitlab.com/panoramax/gitlab-profile/-/raw/main/images/logo.svg", 
+          "email": "the_administrator@mypanoramax.org",
+          "name": {"en": "${INSTANCE_NAME:-A Panoramax instance}", "fr": "Mon petit serveur des familles"},
+          "geo_coverage": {"en": "Anywhere you like", "fr": "Partout où le vent vous portera"}
+        }
+      API_REGISTRATION_IS_OPEN: ${API_REGISTRATION_IS_OPEN:-False} # True if the instance is open to registration, False if not, it is only used in the federation for the moment
+    ports:
+      - 5000
+    healthcheck:
+      test: python -c "import requests; requests.get('http://localhost:5000/api').raise_for_status()"
+      interval: 4s
+      timeout: 5s
+      retries: 10
+      start_period: 1s
+    restart: always
+
+  website:
+    image: panoramax/website:${WEBSITE_IMAGE_TAG:-latest}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    environment:
+      # documentation for configuration: https://docs.panoramax.fr/website/03_Settings/
+      VITE_INSTANCE_NAME: ${INSTANCE_NAME:-A geovisio instance}
+      VITE_API_URL: /
+      VITE_TILES: https://panoramax.openstreetmap.fr/pmtiles/basic.json
+      # optional metadata
+      # The title for the <title> tag of the HTML
+      VITE_TITLE: "${VITE_TITLE:-My Panoramax: The free alternative to photo-mapping territories}"
+      # The title for the meta tags.
+      VITE_META_TITLE: "${VITE_META_TITLE:-My Panoramax: The free alternative to photo-mapping territories}"
+      # The description for meta tags, which is useful for SEO.
+      VITE_META_DESCRIPTION: "${VITE_META_DESCRIPTION:-Panoramax is a digital resource for sharing and using field photos. Anyone can take photographs of places visible from public roads and contribute them to the Panoramax database.}"
+    ports:
+      - 3000
+    restart: always
+
+  # Background workers used to process pictures in the background
+  # calling the blur API and generating derivates (SD picture and tiles for faster rendering in photosphereviewer)
+  # Several background workers can run together — add or remove numbered services below to adjust the count.
+  # Note: the blurring is configured to be done using the OSM-FR service, you can change the variable `API_BLUR_URL` if needed (in the API too).
+  background-worker-1: &worker-default
+    <<: *geovisio-default
+    command: picture-worker
+    exclude_from_hc: true
+    labels:
+      - "traefik.enable=false"
+    depends_on:
+      db:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    restart: always
+    environment:
+      PICTURE_PROCESS_DERIVATES_STRATEGY: PREPROCESS
+      DB_URL: postgres://gvs:${PG_PASSWORD}@db/geovisio
+      FS_TMP_URL: ${FS_TMP_URL}
+      FS_PERMANENT_URL: ${FS_PERMANENT_URL}
+      FS_DERIVATES_URL: ${FS_DERIVATES_URL}
+      API_BLUR_URL: https://blur.panoramax.openstreetmap.fr
+
+  background-worker-2:
+    <<: *worker-default
+
+  background-worker-3:
+    <<: *worker-default
+
+  background-worker-4:
+    <<: *worker-default
+
+  reverseproxy:
+    build:
+      context: .
+      dockerfile: Dockerfile.nginx
+    ports:
+      - 80
+    restart: always
+    depends_on:
+      api:
+        condition: service_healthy
+      auth:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost/api || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  db:
+    environment:
+      POSTGRES_DB: geovisio
+      POSTGRES_PASSWORD: ${PG_PASSWORD}
+      POSTGRES_USER: gvs
+      KC_DB_PASSWORD: ${KC_DB_PASSWORD}
+    healthcheck:
+      test: pg_isready -h db -q -d $$POSTGRES_DB -U $$POSTGRES_USER
+      timeout: 5s
+      interval: 5s
+      retries: 5
+      start_period: 5s
+    build:
+      context: .
+      dockerfile: Dockerfile.postgres
+    ports:
+      - 5432
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+    restart: always
+
+volumes:
+  postgres_data:
+    name: geovisio_auth_postgres_data

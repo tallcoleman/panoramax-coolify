@@ -1,0 +1,21 @@
+FROM quay.io/keycloak/keycloak:26.6.0 AS builder
+
+# Enable health and metrics support
+ENV KC_HEALTH_ENABLED=true
+ENV KC_METRICS_ENABLED=true
+ENV KC_HTTP_MANAGEMENT_HEALTH_ENABLED=true
+# tell keycloak it will be behind a /oauth prefix in nginx
+ENV KC_HTTP_RELATIVE_PATH=/oauth
+
+# Configure a database vendor
+ENV KC_DB=postgres
+
+WORKDIR /opt/keycloak
+
+RUN /opt/keycloak/bin/kc.sh build
+
+FROM quay.io/keycloak/keycloak:26.6.0
+COPY --from=builder /opt/keycloak/ /opt/keycloak/
+COPY keycloak-realm.json /opt/keycloak/data/import/geovisio_realm.json
+
+ENTRYPOINT ["/opt/keycloak/bin/kc.sh"]

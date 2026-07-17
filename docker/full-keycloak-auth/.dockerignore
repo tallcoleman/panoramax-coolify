@@ -1,0 +1,12 @@
+# Documentation — not needed inside any image
+BACKUP.md
+env.example
+
+# Secrets
+.env
+
+# This file itself
+.dockerignore
+
+# Storage placeholder
+pictures_storage/

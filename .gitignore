@@ -1,0 +1,14 @@
+# Secrets — never commit
+.env
+*.env
+
+# Local picture storage (S3 is the live strategy; exclude data but keep the directory)
+docker/full-keycloak-auth/pictures_storage/*
+!docker/full-keycloak-auth/pictures_storage/.gitkeep
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
