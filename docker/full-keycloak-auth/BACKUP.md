@@ -1,8 +1,8 @@
 # Panoramax — Backup & Recovery Strategy
 
-Runbook for a `full-keycloak-auth` Panoramax deployment on **Coolify**, backing up to S3-compatible archive storage, with production images living in S3-compatible application storage, and a weekly copy to an external hard drive.
+Runbook for a `full-keycloak-auth` Panoramax deployment on **Coolify**, backing up to S3-compatible backup storage, with production images living in S3-compatible production storage, and a weekly copy to an external hard drive.
 
-> Everything here is designed to live **in the repo** (scripts + a `backup` service in the compose file) so backups run automatically with no manual steps. Coolify Scheduled Tasks are offered as an alternative where useful.
+> Everything here is designed to live **in the repo** (scripts + a `backup` service in the compose file) so backups run automatically with no manual steps.
 
 ---
 
@@ -14,10 +14,10 @@ A Panoramax instance is made of four kinds of state. Only three of them are irre
 | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ | ------------------------------- | ------------------- |
 | **Postgres `geovisio` DB** (PostGIS) — all metadata: accounts, collections, sequences, picture records + their file paths, semantics, `configurations` (live settings), TOS pages, excluded areas, reports | `db` service                                           | ❌ No                            | ✅ **Yes**           |
 | **Keycloak data** — realm config, clients, **users + password hashes**                                                                                                                                     | Postgres `keycloak` DB *or* a Keycloak volume (see §3) | ❌ No                            | ✅ **Yes**           |
-| **Permanent (HD) pictures** — the original, already-blurred, high-definition files                                                                                                                         | OVHcloud S3 (`FS_PERMANENT_URL`)                       | ❌ No                            | ✅ **Yes**           |
-| **Derivates** — SD, thumbnail, and 360° tiles                                                                                                                                                              | OVHcloud S3 (`derivates/`)                             | ✅ **Yes — regenerated from HD** | 🚫 **Skip** (see §6) |
-| **`tmp/`** — pictures mid-blur                                                                                                                                                                             | OVHcloud S3 or disk                                    | ✅ Transient                     | 🚫 Skip              |
-| **Secrets & config** — `.env`, `docker-compose.yml`, `keycloak-realm.json`, custom themes                                                                                                                  | Your repo + Coolify                                    | ❌ No (secrets)                  | ✅ **Yes**           |
+| **Permanent (HD) pictures** — the original, already-blurred, high-definition files                                                                                                                         | S3 (`FS_PERMANENT_URL`)                                | ❌ No                            | ✅ **Yes**           |
+| **Derivates** — SD, thumbnail, and 360° tiles                                                                                                                                                              | S3 (`FS_DERIVATES_URL`)                                | ✅ **Yes — regenerated from HD** | 🚫 **Skip** (see §6) |
+| **`tmp/`** — pictures mid-blur                                                                                                                                                                             | S3 (`FS_TMP_URL`) or disk                              | ✅ Transient                     | 🚫 Skip              |
+| **Secrets & config** — Coolify env vars (secrets), `docker-compose.yml`, `keycloak-realm.json`, custom themes                                                                                              | Coolify UI + your repo                                 | ❌ No (secrets)                  | ✅ **Yes**           |
 
 Panoramax splits picture storage into `permanent` (irreplaceable originals) and `derivates` (a disposable cache). The CLI even has `panoramax_backend cleanup --cache` whose only job is to delete derivates — they are explicitly throwaway. Regeneration is covered in §6.
 
@@ -28,7 +28,7 @@ Panoramax splits picture storage into `permanent` (irreplaceable originals) and 
 Two tools:
 
 - **`restic`** → Postgres dumps, Keycloak export, and secrets/config. Encrypted, deduplicated, snapshotted, with trivial retention (`forget`/`prune`). Supports a wide variety of storage types. Encryption matters here because these blobs contain credentials.
-- **`rclone`** → the images (OVHcloud S3 → Backblaze B2). Purpose-built for S3-to-S3, transfers only new/changed objects, and (with `copy`) never deletes from the backup. Panoramax picture files are **immutable** once written, so after the first big sync each run only ships newly-uploaded pictures.
+- **`rclone`** → the images (production S3 → backup S3). Purpose-built for S3-to-S3, transfers only new/changed objects, and (with `copy`) never deletes from the backup. Panoramax picture files are **immutable** once written, so after the first big sync each run only ships newly-uploaded pictures.
 
 Both run inside one small **`backup` sidecar** container defined in your compose file, driven by [`supercronic`](https://github.com/aptible/supercronic) (a container-friendly cron). All schedules, retention, and credentials are declared in code.
 
@@ -50,12 +50,14 @@ Either way, §5.4's `kc.sh export` gives you a **portable** realm+users snapshot
 
 ---
 
-## 4. Backblaze B2 setup (one-time)
+## 4. Backup S3 setup (one-time)
 
-1. Create two buckets, e.g. `panoramax-backups` (restic) and `panoramax-images-backup` (rclone).
-2. Create an **Application Key** scoped to those buckets. Note the `keyID` and `applicationKey`.
-3. On `panoramax-images-backup`, turn on **Object Versioning** and add a **Lifecycle rule** such as *"keep prior/hidden versions for 30 days"*. Because we use `rclone copy` (additive), a picture deleted in production stays in the backup; versioning is a second safety net if you later switch to `sync`.
-4. **Record the restic password and B2 keys somewhere independent of the server** (password manager, and on the external drive's notes). You cannot restore an encrypted restic repo without them — see §8.
+1. Create one bucket on your backup S3 provider, e.g. `panoramax-backup`. Two prefixes inside it are used: `restic/` (Postgres dumps, Keycloak export, secrets — via restic) and `images/` (picture files — via rclone).
+2. Create an access key scoped to that bucket. Note the access key ID, secret key, endpoint URL, and region.
+3. Turn on **Object Versioning** on the bucket and add a **Lifecycle rule** such as *"keep prior/hidden versions for 30 days"*. Because we use `rclone copy` (additive), a picture deleted in production stays in the backup; versioning is a second safety net if you later switch to `sync`.
+4. **Record the restic password and backup S3 keys somewhere independent of the server** (password manager, and on the external drive's notes). You cannot restore an encrypted restic repo without them — see §8.
+
+> **Alternative backends.** The scripts below use the generic S3 API on both ends, but rclone also has native remote types for other object stores — e.g. `b2:` for Backblaze B2 (its native API, rather than B2's S3-compatible endpoint) or a `[swift]` remote for OpenStack Swift. The script structure stays the same; just swap the `:s3,...:` connection string in §5.3 for `:b2,account=...,key=...:` or a configured `swift:` remote. Not covered in detail here.
 
 ---
 
@@ -63,26 +65,24 @@ Either way, §5.4's `kc.sh export` gives you a **portable** realm+users snapshot
 
 Create a `backup/` folder in your repo. Working files are written under `/backups` inside the container (a scratch volume), then shipped off-site.
 
-### 5.1 `.env` additions
+### 5.1 Environment variables
+
+In this deployment every environment variable is configured directly in the **Coolify UI** for each service — there is no `.env` file on disk (`env.example` in the repo is documentation only). The block below shows the variable names to add for the `backup` service in Coolify; it is a reference, not a file to create.
 
 ```dotenv
-# ---------- Backblaze B2 ----------
-B2_ACCOUNT_ID=xxxxxxxxxxxx
-B2_ACCOUNT_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-RESTIC_REPOSITORY=b2:panoramax-backups:restic
+# ---------- Backup destination (S3-compatible) ----------
+BACKUP_S3_ACCESS_KEY=xxxx
+BACKUP_S3_SECRET_KEY=xxxx
+BACKUP_S3_ENDPOINT=https://s3.<region>.<provider>.example.com
+BACKUP_S3_REGION=xxxx
+BACKUP_S3_BUCKET=panoramax-backup
+
 RESTIC_PASSWORD=<LONG-RANDOM-PASSPHRASE-STORED-OFFSITE>
 
-# ---------- Image backup: source (OVH S3) ----------
-OVH_S3_ACCESS_KEY=xxxx
-OVH_S3_SECRET_KEY=xxxx
-OVH_S3_ENDPOINT=https://s3.gra.io.cloud.ovh.net   # adjust to your OVH region
-OVH_S3_REGION=gra
-# bucket/prefix holding the HD originals. If you used a single FS_URL, this is
-# "<bucket>/permanent". If you set FS_PERMANENT_URL directly, use that bucket/prefix.
-OVH_PERMANENT_PATH=my-ovh-bucket/permanent
-
-# ---------- Image backup: destination (B2) ----------
-B2_IMAGES_BUCKET=panoramax-images-backup
+# ---------- Production S3 — reused, not re-entered ----------
+# FS_PERMANENT_URL is already set on the api/background-worker services; the
+# backup service is simply given the same value (see §7.3) and parses it at
+# runtime, so production credentials are only ever entered once.
 
 # ---------- Postgres (reuses your existing PG_PASSWORD) ----------
 PGHOST=db
@@ -111,22 +111,36 @@ for db in $DBS; do
   pg_dump -h "$H" -U "$U" -Fc "$db" > "$OUT/${db}.dump"
 done
 
-# 3) Ship encrypted to B2, then apply retention.
+# 3) Ship encrypted to the backup S3, then apply retention.
 restic backup --host panoramax --tag db "$OUT"
 restic forget --host panoramax --tag db \
   --keep-daily 7 --keep-weekly 5 --keep-monthly 12 --prune
 ```
 
-### 5.3 `backup/backup-images.sh` — OVH S3 → B2 (permanent only)
+### 5.3 `backup/backup-images.sh` — production S3 → backup S3 (permanent only)
 
-Uses rclone "connection strings" so **no config file** is needed — everything comes from env.
+Uses rclone "connection strings" so **no config file** is needed — everything comes from env. The source side is **parsed out of `FS_PERMANENT_URL`** (already configured for the api/background-worker services) rather than re-entered, so production credentials live in exactly one place.
 
 ```sh
 #!/bin/sh
 set -eu
 
-SRC=":s3,provider=Other,access_key_id=${OVH_S3_ACCESS_KEY},secret_access_key=${OVH_S3_SECRET_KEY},endpoint=${OVH_S3_ENDPOINT},region=${OVH_S3_REGION}:${OVH_PERMANENT_PATH}"
-DST=":b2,account=${B2_ACCOUNT_ID},key=${B2_ACCOUNT_KEY}:${B2_IMAGES_BUCKET}/permanent"
+# --- Parse production creds/bucket out of FS_PERMANENT_URL (no separate vars needed) ---
+# Format: s3://ACCESS_KEY:SECRET_KEY@bucket/prefix?endpoint_url=<url-encoded>&region=<region>
+rest=${FS_PERMANENT_URL#s3://}
+creds=${rest%%@*}
+after_at=${rest#*@}
+SRC_ACCESS_KEY=${creds%%:*}
+secret_enc=${creds#*:}
+SRC_SECRET_KEY=$(printf '%b' "$(echo "$secret_enc" | sed 's/%/\\x/g')")
+SRC_BUCKET_PATH=${after_at%%\?*}
+query=${after_at#*\?}
+endpoint_enc=$(echo "$query" | sed -n 's/.*endpoint_url=\([^&]*\).*/\1/p')
+SRC_ENDPOINT=$(printf '%b' "$(echo "$endpoint_enc" | sed 's/%/\\x/g')")
+SRC_REGION=$(echo "$query" | sed -n 's/.*region=\([^&]*\).*/\1/p')
+
+SRC=":s3,provider=Other,access_key_id=${SRC_ACCESS_KEY},secret_access_key=${SRC_SECRET_KEY},endpoint=${SRC_ENDPOINT},region=${SRC_REGION}:${SRC_BUCKET_PATH}"
+DST=":s3,provider=Other,access_key_id=${BACKUP_S3_ACCESS_KEY},secret_access_key=${BACKUP_S3_SECRET_KEY},endpoint=${BACKUP_S3_ENDPOINT},region=${BACKUP_S3_REGION}:${BACKUP_S3_BUCKET}/images/permanent"
 
 # 'copy' is additive: it never deletes from the backup, so originals removed in
 # production are retained. Swap to 'sync' only if you want an exact mirror.
@@ -134,7 +148,7 @@ rclone copy "$SRC" "$DST" \
   --transfers 16 --checkers 32 --fast-list --stats-one-line
 ```
 
-Note we deliberately reference only the **permanent** prefix — `derivates/` and `tmp/` are never touched. That is the space saving.
+Note we deliberately reference only the **permanent** prefix — `derivates/` and `tmp/` are never touched. That is the space saving. This parsing assumes `FS_PERMANENT_URL` uses the `s3://` scheme shown above; if your production storage uses a different PyFilesystem backend, build `SRC` manually instead.
 
 ### 5.4 `backup/backup-keycloak.sh` — portable realm export (optional but recommended)
 
@@ -162,7 +176,7 @@ volumes:
 
 The nightly restic run (below) then includes `/backups/keycloak`. `kc.sh export` runs as a one-shot command and does not bind the HTTP port, so it's safe alongside the running server — but test it once on your version.
 
-### 5.5 `backup/backup-config.sh` — secrets & config
+### 5.5 `backup/backup-config.sh` — secrets
 
 ```sh
 #!/bin/sh
@@ -170,18 +184,23 @@ set -eu
 OUT=/backups/config
 rm -rf "$OUT"; mkdir -p "$OUT"
 
-# Mount your stack dir read-only into the backup container at /stack (see compose).
-cp /stack/.env                  "$OUT/env.bak"            2>/dev/null || true
-cp /stack/docker-compose.yml    "$OUT/"                   2>/dev/null || true
-cp /stack/keycloak-realm.json   "$OUT/"                   2>/dev/null || true
-cp -r /stack/themes             "$OUT/themes" 2>/dev/null || true
+# Secrets live only as env vars injected by Coolify — there's no .env file on
+# disk to copy. Serialize the ones the backup service has been given (see the
+# `backup` service's environment: block in §7.3).
+cat > "$OUT/secrets.env" <<EOF
+OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET}
+FLASK_SECRET_KEY=${FLASK_SECRET_KEY}
+PG_PASSWORD=${PG_PASSWORD}
+KC_DB_PASSWORD=${KC_DB_PASSWORD}
+KEYCLOAK_ADMIN_PASSWORD=${KEYCLOAK_ADMIN_PASSWORD}
+EOF
 
 restic backup --host panoramax --tag config "$OUT"
 restic forget --host panoramax --tag config \
   --keep-daily 7 --keep-weekly 5 --keep-monthly 12 --prune
 ```
 
-> Your `docker-compose.yml`, `keycloak-realm.json`, and themes are already in git — the irreplaceable secret is `.env` (it holds `FLASK_SECRET_KEY`, `OAUTH_CLIENT_SECRET`, `PG_PASSWORD`, `KEYCLOAK_ADMIN_PASSWORD`). Keeping an encrypted copy in restic means a full rebuild needs nothing that isn't backed up.
+> `docker-compose.yml`, `keycloak-realm.json`, and themes are already in git and don't need backing up here — a rebuild just re-deploys the repo in Coolify. The irreplaceable pieces are the secret values above (`FLASK_SECRET_KEY`, `OAUTH_CLIENT_SECRET`, `PG_PASSWORD`, `KC_DB_PASSWORD`, `KEYCLOAK_ADMIN_PASSWORD`), which live solely in Coolify's env var store. Keeping an encrypted copy in restic means a full rebuild needs nothing that isn't backed up.
 
 ---
 
@@ -221,9 +240,9 @@ CMD ["supercronic", "/etc/crontab"]
 
 ```cron
 # min hour dom mon dow  command
-0 2 * * *   backup-images.sh     # nightly: new HD pictures OVH -> B2
-30 2 * * *  backup-db.sh         # nightly: geovisio + keycloak + roles -> B2 (encrypted)
-45 2 * * *  backup-config.sh     # nightly: .env + compose + realm + themes -> B2 (encrypted)
+0 2 * * *   backup-images.sh     # nightly: new HD pictures, production S3 -> backup S3
+30 2 * * *  backup-db.sh         # nightly: geovisio + keycloak + roles -> backup S3 (encrypted)
+45 2 * * *  backup-config.sh     # nightly: secrets -> backup S3 (encrypted)
 0 4 * * 0   restic-check.sh      # weekly integrity check (optional)
 ```
 
@@ -240,47 +259,51 @@ CMD ["supercronic", "/etc/crontab"]
       PG_PASSWORD: ${PG_PASSWORD}
       PGHOST: ${PGHOST}
       PGUSER: ${PGUSER}
-      RESTIC_REPOSITORY: ${RESTIC_REPOSITORY}
+      OAUTH_CLIENT_SECRET: ${OAUTH_CLIENT_SECRET}
+      FLASK_SECRET_KEY: ${FLASK_SECRET_KEY}
+      KC_DB_PASSWORD: ${KC_DB_PASSWORD}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      FS_PERMANENT_URL: ${FS_PERMANENT_URL}       # reused from the api/background-worker config
       RESTIC_PASSWORD: ${RESTIC_PASSWORD}
-      B2_ACCOUNT_ID: ${B2_ACCOUNT_ID}
-      B2_ACCOUNT_KEY: ${B2_ACCOUNT_KEY}
-      OVH_S3_ACCESS_KEY: ${OVH_S3_ACCESS_KEY}
-      OVH_S3_SECRET_KEY: ${OVH_S3_SECRET_KEY}
-      OVH_S3_ENDPOINT: ${OVH_S3_ENDPOINT}
-      OVH_S3_REGION: ${OVH_S3_REGION}
-      OVH_PERMANENT_PATH: ${OVH_PERMANENT_PATH}
-      B2_IMAGES_BUCKET: ${B2_IMAGES_BUCKET}
+      RESTIC_REPOSITORY: s3:${BACKUP_S3_ENDPOINT}/${BACKUP_S3_BUCKET}/restic
+      AWS_ACCESS_KEY_ID: ${BACKUP_S3_ACCESS_KEY}      # restic's S3 backend reads these names
+      AWS_SECRET_ACCESS_KEY: ${BACKUP_S3_SECRET_KEY}
+      AWS_DEFAULT_REGION: ${BACKUP_S3_REGION}
+      BACKUP_S3_ACCESS_KEY: ${BACKUP_S3_ACCESS_KEY}   # used directly by backup-images.sh (rclone)
+      BACKUP_S3_SECRET_KEY: ${BACKUP_S3_SECRET_KEY}
+      BACKUP_S3_ENDPOINT: ${BACKUP_S3_ENDPOINT}
+      BACKUP_S3_REGION: ${BACKUP_S3_REGION}
+      BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET}
     volumes:
       - backup_scratch:/backups
       - kc_export:/backups/keycloak:ro          # from §5.4, if used
-      - /path/to/your/stack:/stack:ro           # so backup-config.sh can read .env etc.
 volumes:
   backup_scratch:
   kc_export:
 ```
 
+All of the `${...}` values above are Coolify UI environment variables for the `backup` service — set them there, not in a file. `RESTIC_REPOSITORY` and the `AWS_*` credentials are *derived* from `BACKUP_S3_*` rather than entered separately: restic's S3 backend reads the standard `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_DEFAULT_REGION` names for any S3-compatible endpoint, so the operator only enters the backup S3 credentials once.
+
 **First run:** initialise the restic repo once (from the backup container):
 `docker compose -p geovisio-auth exec backup restic init`. Then trigger a manual run to validate,
 e.g. `docker compose -p geovisio-auth exec backup backup-db.sh`.
-
-### 7.4 Alternative: Coolify Scheduled Tasks (no sidecar)
-
-If you'd rather not add a container, put the same scripts on a small volume and register three Coolify Scheduled Tasks that run them (Coolify executes a command inside a chosen service's container on a cron). Trade-off: the schedule then lives in Coolify's config rather than your git repo, which is slightly less "one place." Coolify also has a **native Postgres backup-to-S3** feature, but it targets Coolify-*managed* database resources; a DB running as part of a compose stack (as here) is best served by the `pg_dump` approach above.
 
 ---
 
 ## 8. Weekly copy to the external hard drive
 
-Both destinations copy down cleanly:
+Both prefixes copy down cleanly using the same rclone connection-string style as §5.3 (substitute your `BACKUP_S3_*` values):
 
 ```bash
+BACKUP=":s3,provider=Other,access_key_id=${BACKUP_S3_ACCESS_KEY},secret_access_key=${BACKUP_S3_SECRET_KEY},endpoint=${BACKUP_S3_ENDPOINT},region=${BACKUP_S3_REGION}:${BACKUP_S3_BUCKET}"
+
 # Encrypted DB/secrets: copy the restic repo, or use restic's native repo-to-repo copy.
-rclone sync b2:panoramax-backups /mnt/hdd/panoramax/restic
+rclone sync "$BACKUP/restic" /mnt/hdd/panoramax/restic
 # Images: plain, directly browsable.
-rclone sync b2:panoramax-images-backup /mnt/hdd/panoramax/images
+rclone sync "$BACKUP/images" /mnt/hdd/panoramax/images
 ```
 
-**The one decision that affects HDD feasibility:** keep the **images unencrypted** (as above) so the drive is directly browsable, but the DB/secrets live in an **encrypted restic repo**. That means the HDD copy of the DB is useless without the `RESTIC_PASSWORD` and B2 keys. **Store those credentials with the drive (offline) and in a password manager.** If you'd rather the HDD be fully self-sufficient with zero secrets, you'd have to drop restic encryption for the DB dumps — not recommended, since those dumps contain user data and password hashes.
+**The one decision that affects HDD feasibility:** keep the **images unencrypted** (as above) so the drive is directly browsable, but the DB/secrets live in an **encrypted restic repo**. That means the HDD copy of the DB is useless without the `RESTIC_PASSWORD` and backup S3 keys. **Store those credentials with the drive (offline) and in a password manager.** If you'd rather the HDD be fully self-sufficient with zero secrets, you'd have to drop restic encryption for the DB dumps — not recommended, since those dumps contain user data and password hashes.
 
 ---
 
@@ -289,14 +312,14 @@ rclone sync b2:panoramax-images-backup /mnt/hdd/panoramax/images
 Assumes a fresh Coolify host and empty S3.
 
 **0. Recover credentials.** From your password manager/HDD notes, get `RESTIC_PASSWORD` +
-`B2_ACCOUNT_ID`/`B2_ACCOUNT_KEY`. Everything else can be pulled from restic.
+`BACKUP_S3_ACCESS_KEY`/`BACKUP_S3_SECRET_KEY`. Everything else can be pulled from restic.
 
 **1. Restore config & secrets.**
 ```bash
 restic restore latest --tag config --target /tmp/restore
-# review /tmp/restore/config/env.bak -> becomes your .env; recover compose/realm/themes
+# review /tmp/restore/config/secrets.env
 ```
-Recreate the stack in Coolify from your repo + restored `.env`.
+Recreate the stack in Coolify from your git repo (docker-compose.yml, keycloak-realm.json, and themes come from there, not from restic), then paste the values from `secrets.env` back into the Coolify UI's environment variables for the relevant services.
 
 **2. Bring up Postgres only**, then restore databases into empty targets (PostGIS wants the extension present before data loads):
 ```bash
@@ -316,10 +339,12 @@ pg_restore -h db -U gvs -d keycloak --no-owner /tmp/restore/pg/keycloak.dump
 ```
 *(If you prefer the portable route for Keycloak: skip the keycloak dump and instead start a clean Keycloak with `--import-realm` pointing at the exported `geovisio-realm.json` from §5.4.)*
 
-**3. Restore images.** Repopulate OVH from B2 (or point the instance at B2 temporarily):
+**3. Restore images.** Repopulate production S3 from the backup S3 (or point the instance at the backup S3 temporarily), using the same connection-string style as §5.3/§8:
 ```bash
-rclone copy b2:panoramax-images-backup/permanent ovh:my-ovh-bucket/permanent \
-  --transfers 16 --fast-list
+BACKUP=":s3,provider=Other,access_key_id=${BACKUP_S3_ACCESS_KEY},secret_access_key=${BACKUP_S3_SECRET_KEY},endpoint=${BACKUP_S3_ENDPOINT},region=${BACKUP_S3_REGION}:${BACKUP_S3_BUCKET}/images/permanent"
+PROD=":s3,provider=Other,access_key_id=<new-prod-access-key>,secret_access_key=<new-prod-secret-key>,endpoint=<new-prod-endpoint>,region=<new-prod-region>:<new-prod-bucket>/permanent"
+
+rclone copy "$BACKUP" "$PROD" --transfers 16 --fast-list
 ```
 Leave `derivates/` and `tmp/` empty.
 
@@ -350,6 +375,6 @@ docker compose -p geovisio-auth exec db \
 
 - **Sequence within a night:** images run first (02:00), DB second (02:30). A picture uploaded in between is captured next night; on restore, any DB row whose file isn't present yet is harmless and clears on the next cycle. Perfect point-in-time consistency isn't needed because picture files are immutable.
 - **Test restores are the whole point.** Do a real restore into a scratch project at least quarterly, and after any major Panoramax or Keycloak upgrade (PostGIS/Keycloak schema versions must match between dump and restore target). Run `restic check` weekly.
-- **Retention** is set in the `forget` flags (7 daily / 5 weekly / 12 monthly) — tune to taste. Images rely on `rclone copy` (additive) plus B2 versioning/lifecycle.
+- **Retention** is set in the `forget` flags (7 daily / 5 weekly / 12 monthly) — tune to taste. Images rely on `rclone copy` (additive) plus the backup S3 bucket's versioning/lifecycle rule.
 - **Don't back up derivates or tmp** — ever. They're the free lunch here.
 
