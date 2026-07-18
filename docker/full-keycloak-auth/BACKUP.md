@@ -30,7 +30,7 @@ Two tools:
 - **`restic`** → Postgres dumps, Keycloak export, and secrets/config. Encrypted, deduplicated, snapshotted, with trivial retention (`forget`/`prune`). Supports a wide variety of storage types. Encryption matters here because these blobs contain credentials.
 - **`rclone`** → the images (production S3 → backup S3). Purpose-built for S3-to-S3, transfers only new/changed objects, and (with `copy`) never deletes from the backup. Panoramax picture files are **immutable** once written, so after the first big sync each run only ships newly-uploaded pictures.
 
-Both run inside one small **`backup` sidecar** container defined in your compose file, driven by [`supercronic`](https://github.com/aptible/supercronic) (a container-friendly cron). All schedules, retention, and credentials are declared in code.
+Both run inside one small **`backup` sidecar** container defined in your compose file, driven by [`supercronic`](https://github.com/aptible/supercronic) (a container-friendly cron). Credentials are declared in code; schedule and retention are also declared in code but overridable via environment variables with sensible defaults (see §7.2 and §7.3).
 
 ---
 
@@ -69,7 +69,7 @@ Create a `backup/` folder in your repo. Working files are written under `/backup
 
 In this deployment every environment variable is configured directly in the **Coolify UI** for each service — there is no `.env` file on disk (`env.example` in the repo is documentation only). The block below shows the variable names to add for the `backup` service in Coolify; it is a reference, not a file to create.
 
-`RESTIC_PASSWORD`, `BACKUP_S3_ACCESS_KEY`, `BACKUP_S3_SECRET_KEY`, `BACKUP_S3_ENDPOINT`, `BACKUP_S3_BUCKET`, `FS_PERMANENT_URL`, `PG_PASSWORD`, `OAUTH_CLIENT_SECRET`, `FLASK_SECRET_KEY`, `KC_DB_PASSWORD`, and `KEYCLOAK_ADMIN_PASSWORD` are **required** — the compose snippet in §7.3 marks them with the `${VAR:?}` syntax (matching the rest of `docker-compose.yml`) so Coolify highlights them in red and the stack refuses to start with a clear error if any is left unset, rather than a backup silently failing at 2am. `BACKUP_S3_REGION`, `PGHOST`, and `PGUSER` stay optional — the scripts fall back to sensible defaults (`db`/`gvs`) or work fine blank on providers that ignore region.
+`RESTIC_PASSWORD`, `BACKUP_S3_ACCESS_KEY`, `BACKUP_S3_SECRET_KEY`, `BACKUP_S3_ENDPOINT`, `BACKUP_S3_BUCKET`, `FS_PERMANENT_URL`, `PG_PASSWORD`, `OAUTH_CLIENT_SECRET`, `FLASK_SECRET_KEY`, `KC_DB_PASSWORD`, and `KEYCLOAK_ADMIN_PASSWORD` are **required** — the compose snippet in §7.3 marks them with the `${VAR:?}` syntax (matching the rest of `docker-compose.yml`) so Coolify highlights them in red and the stack refuses to start with a clear error if any is left unset, rather than a backup silently failing at 2am. `BACKUP_S3_REGION`, `PGHOST`, `PGUSER`, and the schedule/retention variables below stay optional — they all have sensible defaults.
 
 ```dotenv
 # ---------- Backup destination (S3-compatible) ----------
@@ -89,6 +89,17 @@ RESTIC_PASSWORD=<LONG-RANDOM-PASSPHRASE-STORED-OFFSITE>
 # ---------- Postgres (reuses your existing PG_PASSWORD) ----------
 PGHOST=db
 PGUSER=gvs
+
+# ---------- Schedule (optional — cron syntax, defaults shown) ----------
+BACKUP_CRON_IMAGES=0 2 * * *
+BACKUP_CRON_DB=30 2 * * *
+BACKUP_CRON_CONFIG=45 2 * * *
+BACKUP_CRON_CHECK=0 4 * * 0
+
+# ---------- Retention (optional — restic snapshot counts, defaults shown) ----------
+RESTIC_KEEP_DAILY=7
+RESTIC_KEEP_WEEKLY=5
+RESTIC_KEEP_MONTHLY=12
 ```
 
 ### 5.2 `backup/backup-db.sh` — Postgres (geovisio + keycloak + roles)
@@ -116,7 +127,10 @@ done
 # 3) Ship encrypted to the backup S3, then apply retention.
 restic backup --host panoramax --tag db "$OUT"
 restic forget --host panoramax --tag db \
-  --keep-daily 7 --keep-weekly 5 --keep-monthly 12 --prune
+  --keep-daily "${RESTIC_KEEP_DAILY:-7}" \
+  --keep-weekly "${RESTIC_KEEP_WEEKLY:-5}" \
+  --keep-monthly "${RESTIC_KEEP_MONTHLY:-12}" \
+  --prune
 ```
 
 ### 5.3 `backup/backup-images.sh` — production S3 → backup S3 (permanent only)
@@ -199,7 +213,10 @@ EOF
 
 restic backup --host panoramax --tag config "$OUT"
 restic forget --host panoramax --tag config \
-  --keep-daily 7 --keep-weekly 5 --keep-monthly 12 --prune
+  --keep-daily "${RESTIC_KEEP_DAILY:-7}" \
+  --keep-weekly "${RESTIC_KEEP_WEEKLY:-5}" \
+  --keep-monthly "${RESTIC_KEEP_MONTHLY:-12}" \
+  --prune
 ```
 
 > `docker-compose.yml`, `keycloak-realm.json`, and themes are already in git and don't need backing up here — a rebuild just re-deploys the repo in Coolify. The irreplaceable pieces are the secret values above (`FLASK_SECRET_KEY`, `OAUTH_CLIENT_SECRET`, `PG_PASSWORD`, `KC_DB_PASSWORD`, `KEYCLOAK_ADMIN_PASSWORD`), which live solely in Coolify's env var store. Keeping an encrypted copy in restic means a full rebuild needs nothing that isn't backed up.
@@ -226,29 +243,44 @@ restic forget --host panoramax --tag config \
 
 ### 7.1 `backup/Dockerfile`
 
+The schedule is a template rendered at container start (not baked into the image), so it can be overridden per-deployment via env vars without a rebuild:
+
 ```dockerfile
 FROM alpine:3.20
-RUN apk add --no-cache postgresql16-client rclone restic ca-certificates tzdata curl \
+RUN apk add --no-cache postgresql16-client rclone restic ca-certificates tzdata curl gettext \
  && curl -fsSL -o /usr/local/bin/supercronic \
       https://github.com/aptible/supercronic/releases/download/v0.2.33/supercronic-linux-amd64 \
  && chmod +x /usr/local/bin/supercronic
 COPY *.sh /usr/local/bin/
-COPY crontab /etc/crontab
+COPY crontab.template /etc/crontab.template
 RUN chmod +x /usr/local/bin/*.sh
-CMD ["supercronic", "/etc/crontab"]
+CMD ["entrypoint.sh"]
 ```
 
-### 7.2 `backup/crontab`
+(`gettext` provides `envsubst`, used below to render the schedule from env vars.)
+
+### 7.2 `backup/crontab.template` and `backup/entrypoint.sh`
 
 ```cron
 # min hour dom mon dow  command
-0 2 * * *   backup-images.sh     # nightly: new HD pictures, production S3 -> backup S3
-30 2 * * *  backup-db.sh         # nightly: geovisio + keycloak + roles -> backup S3 (encrypted)
-45 2 * * *  backup-config.sh     # nightly: secrets -> backup S3 (encrypted)
-0 4 * * 0   restic-check.sh      # weekly integrity check (optional)
+${BACKUP_CRON_IMAGES}   backup-images.sh     # new HD pictures, production S3 -> backup S3
+${BACKUP_CRON_DB}       backup-db.sh         # geovisio + keycloak + roles -> backup S3 (encrypted)
+${BACKUP_CRON_CONFIG}   backup-config.sh     # secrets -> backup S3 (encrypted)
+${BACKUP_CRON_CHECK}    restic-check.sh      # integrity check (optional)
 ```
 
-`restic-check.sh` can be a one-liner: `restic check --read-data-subset=5%`.
+```sh
+#!/bin/sh
+set -eu
+export BACKUP_CRON_IMAGES="${BACKUP_CRON_IMAGES:-0 2 * * *}"
+export BACKUP_CRON_DB="${BACKUP_CRON_DB:-30 2 * * *}"
+export BACKUP_CRON_CONFIG="${BACKUP_CRON_CONFIG:-45 2 * * *}"
+export BACKUP_CRON_CHECK="${BACKUP_CRON_CHECK:-0 4 * * 0}"
+envsubst < /etc/crontab.template > /etc/crontab
+exec supercronic /etc/crontab
+```
+
+`envsubst` fails closed: if a schedule expression is malformed, supercronic errors parsing `/etc/crontab` at startup and the container crash-loops under `restart: unless-stopped` — loud and visible in Coolify's logs, rather than a schedule silently not running. `restic-check.sh` can be a one-liner: `restic check --read-data-subset=5%`.
 
 ### 7.3 compose service (add to `docker-compose.yml`)
 
@@ -276,6 +308,13 @@ CMD ["supercronic", "/etc/crontab"]
       BACKUP_S3_ENDPOINT: ${BACKUP_S3_ENDPOINT:?}
       BACKUP_S3_REGION: ${BACKUP_S3_REGION}
       BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET:?}
+      BACKUP_CRON_IMAGES: ${BACKUP_CRON_IMAGES:-0 2 * * *}
+      BACKUP_CRON_DB: ${BACKUP_CRON_DB:-30 2 * * *}
+      BACKUP_CRON_CONFIG: ${BACKUP_CRON_CONFIG:-45 2 * * *}
+      BACKUP_CRON_CHECK: ${BACKUP_CRON_CHECK:-0 4 * * 0}
+      RESTIC_KEEP_DAILY: ${RESTIC_KEEP_DAILY:-7}
+      RESTIC_KEEP_WEEKLY: ${RESTIC_KEEP_WEEKLY:-5}
+      RESTIC_KEEP_MONTHLY: ${RESTIC_KEEP_MONTHLY:-12}
     volumes:
       - backup_scratch:/backups
       - kc_export:/backups/keycloak:ro          # from §5.4, if used
@@ -287,6 +326,8 @@ volumes:
 All of the `${...}` values above are Coolify UI environment variables for the `backup` service — set them there, not in a file. `RESTIC_REPOSITORY` and the `AWS_*` credentials are *derived* from `BACKUP_S3_*` rather than entered separately: restic's S3 backend reads the standard `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_DEFAULT_REGION` names for any S3-compatible endpoint, so the operator only enters the backup S3 credentials once.
 
 The `:?` suffix marks a variable as required, matching the convention used elsewhere in `docker-compose.yml`: Coolify highlights an unset required variable in red, and `docker compose up` refuses to start with a clear "variable is not set" error instead of silently passing an empty string into the container. Without it, a missing `RESTIC_PASSWORD` or `BACKUP_S3_*` value wouldn't fail until the first cron run — and possibly not until someone notices backups are missing weeks later. `BACKUP_S3_REGION` is left optional since many S3-compatible providers ignore it, and `PGHOST`/`PGUSER` default to the values used elsewhere in this stack (`db`/`gvs`).
+
+`BACKUP_CRON_*` and `RESTIC_KEEP_*` are all optional, defaulting to today's fixed schedule (02:00/02:30/02:45 nightly, weekly integrity check) and retention (7 daily / 5 weekly / 12 monthly). Changing a `RESTIC_KEEP_*` value takes effect on the next scheduled run with no rebuild — just edit the Coolify env var and restart the container. Changing a `BACKUP_CRON_*` value also just needs a restart, but since `entrypoint.sh` renders `/etc/crontab` at container startup, a malformed cron expression will crash-loop the container until fixed (see §7.2) — check the container logs after changing a schedule.
 
 **First run:** initialise the restic repo once (from the backup container):
 `docker compose -p geovisio-auth exec backup restic init`. Then trigger a manual run to validate,
@@ -379,6 +420,7 @@ docker compose -p geovisio-auth exec db \
 
 - **Sequence within a night:** images run first (02:00), DB second (02:30). A picture uploaded in between is captured next night; on restore, any DB row whose file isn't present yet is harmless and clears on the next cycle. Perfect point-in-time consistency isn't needed because picture files are immutable.
 - **Test restores are the whole point.** Do a real restore into a scratch project at least quarterly, and after any major Panoramax or Keycloak upgrade (PostGIS/Keycloak schema versions must match between dump and restore target). Run `restic check` weekly.
-- **Retention** is set in the `forget` flags (7 daily / 5 weekly / 12 monthly) — tune to taste. Images rely on `rclone copy` (additive) plus the backup S3 bucket's versioning/lifecycle rule.
+- **Retention** defaults to 7 daily / 5 weekly / 12 monthly, overridable via `RESTIC_KEEP_DAILY`/`RESTIC_KEEP_WEEKLY`/`RESTIC_KEEP_MONTHLY` (§5.1, §7.3) — tune to taste. Images rely on `rclone copy` (additive) plus the backup S3 bucket's versioning/lifecycle rule.
+- **Schedule** defaults to the times in §7.2, overridable via `BACKUP_CRON_IMAGES`/`BACKUP_CRON_DB`/`BACKUP_CRON_CONFIG`/`BACKUP_CRON_CHECK` — keep images before DB if you change them, since §10's point-in-time reasoning depends on that order.
 - **Don't back up derivates or tmp** — ever. They're the free lunch here.
 
