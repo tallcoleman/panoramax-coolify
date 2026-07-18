@@ -26,8 +26,8 @@ services:
       GEOVISIO_CLIENT_SECRET: ${OAUTH_CLIENT_SECRET}
 
       # Keycloak admin account
-      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:-admin}
-      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      KC_BOOTSTRAP_KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:-admin}
+      KC_BOOTSTRAP_KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
 
       # Database connection
       # note: keycloak uses the same database as geovisio, in a separate schema, this way there is only 1 database to backup

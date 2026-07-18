@@ -33,11 +33,15 @@ Coolify has several constraints that differ from plain Docker Compose:
 - **RFC 7239 `Forwarded` header stripped** — Traefik sets the `Forwarded` header (RFC 7239) but without a port, which caused Keycloak's `ForwardedHeadersParser` to log errors and misidentify the request origin. nginx now strips it before forwarding to Keycloak: `proxy_set_header Forwarded "";`
 - **`Host` header added to `/oauth` proxy block** — ensures Keycloak sees the correct hostname when constructing redirect URLs.
 - **`reverseproxy` healthcheck added** — Coolify needs a health signal before marking the stack healthy.
+- **`website` healthcheck added** — `curl -sf http://localhost:3000` so Coolify can gate on the frontend being ready.
 
 ---
 
 ## Keycloak 26.x compatibility
 
+- **Admin bootstrap variable names updated** — Keycloak 26 renamed the bootstrap admin credentials from `KEYCLOAK_ADMIN`/`KEYCLOAK_ADMIN_PASSWORD` to `KC_BOOTSTRAP_KEYCLOAK_ADMIN`/`KC_BOOTSTRAP_KEYCLOAK_ADMIN_PASSWORD`. Updated to match upstream; the `.env` variable names (`KEYCLOAK_ADMIN`, `KEYCLOAK_ADMIN_PASSWORD`) are unchanged.
+- **`KC_HOSTNAME_PATH: /oauth`** — tells Keycloak it is deployed under the `/oauth` path prefix so it generates correct redirect URLs and asset paths through nginx.
+- **`KC_HTTP_MANAGEMENT_HEALTH_ENABLED: "true"`** — enables Keycloak's management health endpoint on port 9000, required for the healthcheck probe.
 - **Auth healthcheck updated** — Keycloak 26's management health endpoints are not reliably available in this build configuration. The healthcheck now hits `/oauth/realms/master` over HTTP/1.0, which proves the database is up, the realm is loaded, and Keycloak is serving requests.
 - **Login theme fixed** — the `geovisio` Keycloak client had `loginTheme: "base"` which rendered an unstyled login page. Corrected to `"keycloak"`.
 
@@ -50,6 +54,7 @@ Migrated from local filesystem storage to S3-compatible object storage:
 - Replaced the single `FS_URL` environment variable with three separate variables: `FS_TMP_URL`, `FS_PERMANENT_URL`, and `FS_DERIVATES_URL`, allowing each storage tier to be pointed at a different bucket or prefix.
 - Added `S3_PERMANENT_PUBLIC_URL` and `S3_DERIVATES_PUBLIC_URL` for serving pictures directly from S3 without proxying through the API.
 - Removed local volume mounts for picture storage from the nginx and API services.
+- **nginx `/permanent/` and `/derivates/` location blocks removed** — the upstream config served pictures directly from a local `pic_data` volume via these location blocks. With S3 storage those paths are handled by clients going directly to S3 via `S3_PERMANENT_PUBLIC_URL`/`S3_DERIVATES_PUBLIC_URL`, so the blocks and their UUID-to-path rewrite rule are not needed.
 - Removed the hardcoded `ENV FS_URL="/data/geovisio"` default from the upstream `Dockerfile`, which conflicted with the split S3 variables.
 
 ---
