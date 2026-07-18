@@ -36,16 +36,15 @@ Both run inside one small **`backup` sidecar** container defined in your compose
 
 ## 3. Confirm how Keycloak stores its data (one command)
 
-This compose *usually* runs Keycloak against the **same Postgres cluster** as the API (a separate `keycloak` database on the `db` service). If so, the database backup in §5 already covers Keycloak completely and you need nothing extra. Confirm it:
+In this compose, Keycloak shares the **`geovisio` database** with the API but stores its tables in a dedicated **`keycloak` schema** (`KC_DB_SCHEMA: keycloak`, `KC_DB_URL: jdbc:postgresql://db/geovisio`). Because `pg_dump geovisio` captures all schemas by default, the database backup in §5 already covers Keycloak completely — there is only one database to back up. Confirm it:
 
 ```bash
 docker compose -p geovisio-auth exec db \
-  psql -U gvs -d postgres -Atc "SELECT datname FROM pg_database WHERE datistemplate=false;"
+  psql -U gvs -d geovisio -Atc "SELECT schema_name FROM information_schema.schemata;"
 ```
 
-- If the list includes **`keycloak`** → co-located. ✅ Covered automatically by §5's dump loop.
-- If it does **not** → Keycloak is using its own DB or a file store. Find its volume in
- `docker-compose.yml` (look at the `keycloak` service's `volumes:` and `KC_DB*` env), and either point the DB dump at that database too, or rely on the realm export in §5.4 as the primary Keycloak backup.
+- If the list includes **`keycloak`** → ✅ Keycloak is in the `geovisio` DB. Covered automatically by §5's `pg_dump geovisio`.
+- If it does **not** → Keycloak may be using its own database or a file store. Check `KC_DB*` env vars in the `auth` service, and either add that database to the dump loop in §5.2 or rely on the realm export in §5.4 as the primary Keycloak backup.
 
 Either way, §5.4's `kc.sh export` gives you a **portable** realm+users snapshot as a safety net.
 
