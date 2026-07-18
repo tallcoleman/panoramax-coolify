@@ -55,7 +55,7 @@ Migrated from local filesystem storage to S3-compatible object storage:
 - Added `S3_PERMANENT_PUBLIC_URL` and `S3_DERIVATES_PUBLIC_URL` for serving pictures directly from S3 without proxying through the API.
 - Removed local volume mounts for picture storage from the nginx and API services.
 - **nginx `/permanent/` and `/derivates/` location blocks removed** — the upstream config served pictures directly from a local `pic_data` volume via these location blocks. With S3 storage those paths are handled by clients going directly to S3 via `S3_PERMANENT_PUBLIC_URL`/`S3_DERIVATES_PUBLIC_URL`, so the blocks and their UUID-to-path rewrite rule are not needed.
-- Removed the hardcoded `ENV FS_URL="/data/geovisio"` default from the upstream `Dockerfile`, which conflicted with the split S3 variables.
+- **`FS_URL` explicitly blanked in compose** — the pre-built `panoramax/api` image has `ENV FS_URL="/data/geovisio"` baked in. Setting `FS_URL: ""` in the `migrations`, `api`, and `background-worker-*` environment blocks overrides it so the split S3 variables are used instead.
 
 ---
 

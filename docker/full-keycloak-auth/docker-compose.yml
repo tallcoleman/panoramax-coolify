@@ -12,6 +12,10 @@
 x-base-geovisio: &geovisio-default
   image: panoramax/api:${GEOVISIO_IMAGE_TAG:-latest}
 
+x-base-geovisio-env: &geovisio-default-env
+  # Override the FS_URL default baked into the pre-built image; the split S3 variables are used instead
+  FS_URL: ""
+
 services:
   auth:
     build:
@@ -76,6 +80,7 @@ services:
     restart: "no"
     exclude_from_hc: true
     environment:
+      <<: *geovisio-default-env
       DB_URL: postgres://gvs:${PG_PASSWORD}@db/geovisio
     depends_on:
       db:
@@ -92,6 +97,7 @@ services:
       migrations:
         condition: service_completed_successfully
     environment:
+      <<: *geovisio-default-env
       OAUTH_PROVIDER: oidc
       OAUTH_CLIENT_ID: geovisio
       OAUTH_CLIENT_SECRET: ${OAUTH_CLIENT_SECRET}
@@ -176,6 +182,7 @@ services:
         condition: service_completed_successfully
     restart: always
     environment:
+      <<: *geovisio-default-env
       PICTURE_PROCESS_DERIVATES_STRATEGY: PREPROCESS
       DB_URL: postgres://gvs:${PG_PASSWORD}@db/geovisio
       FS_TMP_URL: ${FS_TMP_URL}
