@@ -1,60 +1,42 @@
 # Panoramax — Backup & Recovery Strategy
 
-Runbook for a `full-keycloak-auth` Panoramax deployment on **Coolify**, backing up to
-**Backblaze B2**, with production images living in **OVHcloud S3**, and a weekly copy to an
-external hard drive.
+Runbook for a `full-keycloak-auth` Panoramax deployment on **Coolify**, backing up to S3-compatible archive storage, with production images living in S3-compatible application storage, and a weekly copy to an external hard drive.
 
-> Everything here is designed to live **in your repo** (scripts + a `backup` service in the
-> compose file) so backups run automatically with no manual steps. Coolify Scheduled Tasks are
-> offered as an alternative where useful.
+> Everything here is designed to live **in the repo** (scripts + a `backup` service in the compose file) so backups run automatically with no manual steps. Coolify Scheduled Tasks are offered as an alternative where useful.
 
 ---
 
-## 1. What actually needs backing up
+## 1. What needs backing up
 
 A Panoramax instance is made of four kinds of state. Only three of them are irreplaceable.
 
-| Data | Where it lives | Replaceable? | Back up? |
-|---|---|---|---|
-| **Postgres `geovisio` DB** (PostGIS) — all metadata: accounts, collections, sequences, picture records + their file paths, semantics, `configurations` (live settings), TOS pages, excluded areas, reports | `db` service | ❌ No | ✅ **Yes** |
-| **Keycloak data** — realm config, clients, **users + password hashes** | Postgres `keycloak` DB *or* a Keycloak volume (see §3) | ❌ No | ✅ **Yes** |
-| **Permanent (HD) pictures** — the original, already-blurred, high-definition files | OVHcloud S3 (`FS_PERMANENT_URL`) | ❌ No | ✅ **Yes** |
-| **Derivates** — SD, thumbnail, and 360° tiles | OVHcloud S3 (`derivates/`) | ✅ **Yes — regenerated from HD** | 🚫 **Skip** (see §6) |
-| **`tmp/`** — pictures mid-blur | OVHcloud S3 or disk | ✅ Transient | 🚫 Skip |
-| **Secrets & config** — `.env`, `docker-compose.yml`, `keycloak-realm.json`, custom themes | Your repo + Coolify | ❌ No (secrets) | ✅ **Yes** |
+| Data                                                                                                                                                                                                       | Where it lives                                         | Replaceable?                    | Back up?            |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ | ------------------------------- | ------------------- |
+| **Postgres `geovisio` DB** (PostGIS) — all metadata: accounts, collections, sequences, picture records + their file paths, semantics, `configurations` (live settings), TOS pages, excluded areas, reports | `db` service                                           | ❌ No                            | ✅ **Yes**           |
+| **Keycloak data** — realm config, clients, **users + password hashes**                                                                                                                                     | Postgres `keycloak` DB *or* a Keycloak volume (see §3) | ❌ No                            | ✅ **Yes**           |
+| **Permanent (HD) pictures** — the original, already-blurred, high-definition files                                                                                                                         | OVHcloud S3 (`FS_PERMANENT_URL`)                       | ❌ No                            | ✅ **Yes**           |
+| **Derivates** — SD, thumbnail, and 360° tiles                                                                                                                                                              | OVHcloud S3 (`derivates/`)                             | ✅ **Yes — regenerated from HD** | 🚫 **Skip** (see §6) |
+| **`tmp/`** — pictures mid-blur                                                                                                                                                                             | OVHcloud S3 or disk                                    | ✅ Transient                     | 🚫 Skip              |
+| **Secrets & config** — `.env`, `docker-compose.yml`, `keycloak-realm.json`, custom themes                                                                                                                  | Your repo + Coolify                                    | ❌ No (secrets)                  | ✅ **Yes**           |
 
-**The single most important insight:** Panoramax splits picture storage into `permanent`
-(irreplaceable originals) and `derivates` (a disposable cache). The CLI even has
-`panoramax_backend cleanup --cache` whose only job is to delete derivates — they are explicitly
-throwaway. So **yes, your instinct is correct: back up only the HD/permanent files and skip the
-derivates.** This typically saves a large fraction of image storage (for 360° imagery the tiles
-alone can rival or exceed the originals). Regeneration is covered in §6.
+Panoramax splits picture storage into `permanent` (irreplaceable originals) and `derivates` (a disposable cache). The CLI even has `panoramax_backend cleanup --cache` whose only job is to delete derivates — they are explicitly throwaway. Regeneration is covered in §6.
 
 ---
 
 ## 2. Tooling & why
 
-Two tools, each doing what it's best at:
+Two tools:
 
-- **`restic`** → Postgres dumps, Keycloak export, and secrets/config.
-  Encrypted, deduplicated, snapshotted, with trivial retention (`forget`/`prune`). Native
-  Backblaze B2 support. Encryption matters here because these blobs contain credentials.
-- **`rclone`** → the images (OVHcloud S3 → Backblaze B2).
-  Purpose-built for S3-to-S3, transfers only new/changed objects, and (with `copy`) never deletes
-  from the backup. Panoramax picture files are **immutable** once written, so after the first big
-  sync each run only ships newly-uploaded pictures.
+- **`restic`** → Postgres dumps, Keycloak export, and secrets/config. Encrypted, deduplicated, snapshotted, with trivial retention (`forget`/`prune`). Supports a wide variety of storage types. Encryption matters here because these blobs contain credentials.
+- **`rclone`** → the images (OVHcloud S3 → Backblaze B2). Purpose-built for S3-to-S3, transfers only new/changed objects, and (with `copy`) never deletes from the backup. Panoramax picture files are **immutable** once written, so after the first big sync each run only ships newly-uploaded pictures.
 
-Both run inside one small **`backup` sidecar** container defined in your compose file, driven by
-[`supercronic`](https://github.com/aptible/supercronic) (a container-friendly cron). All
-schedules, retention, and credentials are declared in code.
+Both run inside one small **`backup` sidecar** container defined in your compose file, driven by [`supercronic`](https://github.com/aptible/supercronic) (a container-friendly cron). All schedules, retention, and credentials are declared in code.
 
 ---
 
 ## 3. Confirm how Keycloak stores its data (one command)
 
-This compose *usually* runs Keycloak against the **same Postgres cluster** as the API (a separate
-`keycloak` database on the `db` service). If so, the database backup in §5 already covers Keycloak
-completely and you need nothing extra. Confirm it:
+This compose *usually* runs Keycloak against the **same Postgres cluster** as the API (a separate `keycloak` database on the `db` service). If so, the database backup in §5 already covers Keycloak completely and you need nothing extra. Confirm it:
 
 ```bash
 docker compose -p geovisio-auth exec db \
@@ -63,9 +45,7 @@ docker compose -p geovisio-auth exec db \
 
 - If the list includes **`keycloak`** → co-located. ✅ Covered automatically by §5's dump loop.
 - If it does **not** → Keycloak is using its own DB or a file store. Find its volume in
-  `docker-compose.yml` (look at the `keycloak` service's `volumes:` and `KC_DB*` env), and either
-  point the DB dump at that database too, or rely on the realm export in §5.4 as the primary
-  Keycloak backup.
+ `docker-compose.yml` (look at the `keycloak` service's `volumes:` and `KC_DB*` env), and either point the DB dump at that database too, or rely on the realm export in §5.4 as the primary Keycloak backup.
 
 Either way, §5.4's `kc.sh export` gives you a **portable** realm+users snapshot as a safety net.
 
@@ -75,20 +55,14 @@ Either way, §5.4's `kc.sh export` gives you a **portable** realm+users snapshot
 
 1. Create two buckets, e.g. `panoramax-backups` (restic) and `panoramax-images-backup` (rclone).
 2. Create an **Application Key** scoped to those buckets. Note the `keyID` and `applicationKey`.
-3. On `panoramax-images-backup`, turn on **Object Versioning** and add a **Lifecycle rule** such
-   as *"keep prior/hidden versions for 30 days"*. Because we use `rclone copy` (additive), a
-   picture deleted in production stays in the backup; versioning is a second safety net if you
-   later switch to `sync`.
-4. **Record the restic password and B2 keys somewhere independent of the server** (password
-   manager, and on the external drive's notes). You cannot restore an encrypted restic repo
-   without them — see §8.
+3. On `panoramax-images-backup`, turn on **Object Versioning** and add a **Lifecycle rule** such as *"keep prior/hidden versions for 30 days"*. Because we use `rclone copy` (additive), a picture deleted in production stays in the backup; versioning is a second safety net if you later switch to `sync`.
+4. **Record the restic password and B2 keys somewhere independent of the server** (password manager, and on the external drive's notes). You cannot restore an encrypted restic repo without them — see §8.
 
 ---
 
 ## 5. The backup scripts
 
-Create a `backup/` folder in your repo. Working files are written under `/backups` inside the
-container (a scratch volume), then shipped off-site.
+Create a `backup/` folder in your repo. Working files are written under `/backups` inside the container (a scratch volume), then shipped off-site.
 
 ### 5.1 `.env` additions
 
@@ -161,18 +135,13 @@ rclone copy "$SRC" "$DST" \
   --transfers 16 --checkers 32 --fast-list --stats-one-line
 ```
 
-Note we deliberately reference only the **permanent** prefix — `derivates/` and `tmp/` are never
-touched. That is the space saving.
+Note we deliberately reference only the **permanent** prefix — `derivates/` and `tmp/` are never touched. That is the space saving.
 
 ### 5.4 `backup/backup-keycloak.sh` — portable realm export (optional but recommended)
 
-If Keycloak is co-located in the shared Postgres (§3), the DB dump already backs it up fully and
-this is a **bonus** portable/human-readable snapshot. `kc.sh export` includes users **and**
-password hashes, so it can fully rebuild the realm on a clean Keycloak.
+If Keycloak is co-located in the shared Postgres (§3), the DB dump already backs it up fully and this is a **bonus** portable/human-readable snapshot. `kc.sh export` includes users **and** password hashes, so it can fully rebuild the realm on a clean Keycloak.
 
-The clean, socket-free way is to let Keycloak write the export to a **shared named volume** that
-the backup container also mounts, then let restic pick it up. Trigger the export with a Coolify
-Scheduled Task on the `keycloak` container:
+The clean, socket-free way is to let Keycloak write the export to a **shared named volume** that the backup container also mounts, then let restic pick it up. Trigger the export with a Coolify Scheduled Task on the `keycloak` container:
 
 ```bash
 # Coolify Scheduled Task → container: keycloak → schedule: 0 3 * * *
@@ -192,9 +161,7 @@ volumes:
   kc_export:
 ```
 
-The nightly restic run (below) then includes `/backups/keycloak`. `kc.sh export` runs as a
-one-shot command and does not bind the HTTP port, so it's safe alongside the running server —
-but test it once on your version.
+The nightly restic run (below) then includes `/backups/keycloak`. `kc.sh export` runs as a one-shot command and does not bind the HTTP port, so it's safe alongside the running server — but test it once on your version.
 
 ### 5.5 `backup/backup-config.sh` — secrets & config
 
@@ -215,37 +182,23 @@ restic forget --host panoramax --tag config \
   --keep-daily 7 --keep-weekly 5 --keep-monthly 12 --prune
 ```
 
-> Your `docker-compose.yml`, `keycloak-realm.json`, and themes are already in git — the
-> irreplaceable secret is `.env` (it holds `FLASK_SECRET_KEY`, `OAUTH_CLIENT_SECRET`,
-> `PG_PASSWORD`, `KEYCLOAK_ADMIN_PASSWORD`). Keeping an encrypted copy in restic means a full
-> rebuild needs nothing that isn't backed up.
+> Your `docker-compose.yml`, `keycloak-realm.json`, and themes are already in git — the irreplaceable secret is `.env` (it holds `FLASK_SECRET_KEY`, `OAUTH_CLIENT_SECRET`, `PG_PASSWORD`, `KEYCLOAK_ADMIN_PASSWORD`). Keeping an encrypted copy in restic means a full rebuild needs nothing that isn't backed up.
 
 ---
 
 ## 6. Derivates: skipping them, and regenerating on restore
 
-**Why skipping is safe.** Derivates (SD, thumbnail, tiles) are a cache derived from the permanent
-HD file. The permanent file is stored **already blurred**, so any regenerated derivate inherits
-the blur — skipping them creates no privacy regression.
+**Why skipping is safe.** Derivates (SD, thumbnail, tiles) are a cache derived from the permanent HD file. The permanent file is stored **already blurred**, so any regenerated derivate inherits the blur — skipping them creates no privacy regression.
 
 **How they come back depends on `PICTURE_PROCESS_DERIVATES_STRATEGY`:**
 
-- **`ON_DEMAND` (the default).** A missing derivate is generated from the HD original the first
-  time it's requested, then cached. After a restore you do **nothing** — the cache refills lazily
-  as people browse. This is the simplest posture and the reason skipping derivates is low-risk.
+- **`ON_DEMAND` (the default).** A missing derivate is generated from the HD original the first time it's requested, then cached. After a restore you do **nothing** — the cache refills lazily as people browse. This is the simplest posture and the reason skipping derivates is low-risk.
 
 - **`PREPROCESS`.** All derivates are generated up front during processing.
-  - If derivates are still served **through the API**, the on-demand path remains as a fallback,
-    so a missing file self-heals on request anyway.
-  - If you serve derivates **directly from S3** via `API_DERIVATES_PICTURES_PUBLIC_URL` (which
-    *requires* `PREPROCESS`), the API is **not** in the request path, so missing files won't
-    self-heal — you must regenerate them before they'll serve. Do a one-time **warm-up crawl**
-    after restore (§7, step 6), or temporarily serve derivates through the API while the cache
-    refills.
+  - If derivates are still served **through the API**, the on-demand path remains as a fallback, so a missing file self-heals on request anyway.
+  - If you serve derivates **directly from S3** via `API_DERIVATES_PICTURES_PUBLIC_URL` (which *requires* `PREPROCESS`), the API is **not** in the request path, so missing files won't self-heal — you must regenerate them before they'll serve. Do a one-time **warm-up crawl** after restore (§7, step 6), or temporarily serve derivates through the API while the cache refills.
 
-**Recommendation:** unless you have a strong reason to pre-generate, run `ON_DEMAND` so restores
-are zero-effort for images. If you're on `PREPROCESS` + direct-S3 serving, keep the warm-up script
-handy.
+**Recommendation:** unless you have a strong reason to pre-generate, run `ON_DEMAND` so restores are zero-effort for images. If you're on `PREPROCESS` + direct-S3 serving, keep the warm-up script handy.
 
 ---
 
@@ -313,12 +266,7 @@ e.g. `docker compose -p geovisio-auth exec backup backup-db.sh`.
 
 ### 7.4 Alternative: Coolify Scheduled Tasks (no sidecar)
 
-If you'd rather not add a container, put the same scripts on a small volume and register three
-Coolify Scheduled Tasks that run them (Coolify executes a command inside a chosen service's
-container on a cron). Trade-off: the schedule then lives in Coolify's config rather than your git
-repo, which is slightly less "one place." Coolify also has a **native Postgres backup-to-S3**
-feature, but it targets Coolify-*managed* database resources; a DB running as part of a compose
-stack (as here) is best served by the `pg_dump` approach above.
+If you'd rather not add a container, put the same scripts on a small volume and register three Coolify Scheduled Tasks that run them (Coolify executes a command inside a chosen service's container on a cron). Trade-off: the schedule then lives in Coolify's config rather than your git repo, which is slightly less "one place." Coolify also has a **native Postgres backup-to-S3** feature, but it targets Coolify-*managed* database resources; a DB running as part of a compose stack (as here) is best served by the `pg_dump` approach above.
 
 ---
 
@@ -333,12 +281,7 @@ rclone sync b2:panoramax-backups /mnt/hdd/panoramax/restic
 rclone sync b2:panoramax-images-backup /mnt/hdd/panoramax/images
 ```
 
-**The one decision that affects HDD feasibility:** keep the **images unencrypted** (as above) so
-the drive is directly browsable, but the DB/secrets live in an **encrypted restic repo**. That
-means the HDD copy of the DB is useless without the `RESTIC_PASSWORD` and B2 keys. **Store those
-credentials with the drive (offline) and in a password manager.** If you'd rather the HDD be
-fully self-sufficient with zero secrets, you'd have to drop restic encryption for the DB dumps —
-not recommended, since those dumps contain user data and password hashes.
+**The one decision that affects HDD feasibility:** keep the **images unencrypted** (as above) so the drive is directly browsable, but the DB/secrets live in an **encrypted restic repo**. That means the HDD copy of the DB is useless without the `RESTIC_PASSWORD` and B2 keys. **Store those credentials with the drive (offline) and in a password manager.** If you'd rather the HDD be fully self-sufficient with zero secrets, you'd have to drop restic encryption for the DB dumps — not recommended, since those dumps contain user data and password hashes.
 
 ---
 
@@ -356,8 +299,7 @@ restic restore latest --tag config --target /tmp/restore
 ```
 Recreate the stack in Coolify from your repo + restored `.env`.
 
-**2. Bring up Postgres only**, then restore databases into empty targets (PostGIS wants the
-extension present before data loads):
+**2. Bring up Postgres only**, then restore databases into empty targets (PostGIS wants the extension present before data loads):
 ```bash
 restic restore latest --tag db --target /tmp/restore   # -> /tmp/restore/pg/*.dump, globals.sql
 
@@ -373,8 +315,7 @@ pg_restore -h db -U gvs -d geovisio --no-owner /tmp/restore/pg/geovisio.dump   #
 psql -h db -U gvs -d postgres -c "CREATE DATABASE keycloak;"
 pg_restore -h db -U gvs -d keycloak --no-owner /tmp/restore/pg/keycloak.dump
 ```
-*(If you prefer the portable route for Keycloak: skip the keycloak dump and instead start a clean
-Keycloak with `--import-realm` pointing at the exported `geovisio-realm.json` from §5.4.)*
+*(If you prefer the portable route for Keycloak: skip the keycloak dump and instead start a clean Keycloak with `--import-realm` pointing at the exported `geovisio-realm.json` from §5.4.)*
 
 **3. Restore images.** Repopulate OVH from B2 (or point the instance at B2 temporarily):
 ```bash
@@ -402,22 +343,14 @@ docker compose -p geovisio-auth exec db \
   done
 ```
 
-**7. Verify:** `curl --fail https://<your-domain>/api`; log in via Keycloak (confirms the
-`keycloak` DB/realm restored and `OAUTH_CLIENT_SECRET` still matches); open a picture (confirms
-HD present + derivate regeneration); spot-check collection/picture counts against expectations.
+**7. Verify:** `curl --fail https://<your-domain>/api`; log in via Keycloak (confirms the `keycloak` DB/realm restored and `OAUTH_CLIENT_SECRET` still matches); open a picture (confirms HD present + derivate regeneration); spot-check collection/picture counts against expectations.
 
 ---
 
 ## 10. Operating notes
 
-- **Sequence within a night:** images run first (02:00), DB second (02:30). A picture uploaded in
-  between is captured next night; on restore, any DB row whose file isn't present yet is harmless
-  and clears on the next cycle. Perfect point-in-time consistency isn't needed because picture
-  files are immutable.
-- **Test restores are the whole point.** Do a real restore into a scratch project at least
-  quarterly, and after any major Panoramax or Keycloak upgrade (PostGIS/Keycloak schema versions
-  must match between dump and restore target). Run `restic check` weekly.
-- **Retention** is set in the `forget` flags (7 daily / 5 weekly / 12 monthly) — tune to taste.
-  Images rely on `rclone copy` (additive) plus B2 versioning/lifecycle.
+- **Sequence within a night:** images run first (02:00), DB second (02:30). A picture uploaded in between is captured next night; on restore, any DB row whose file isn't present yet is harmless and clears on the next cycle. Perfect point-in-time consistency isn't needed because picture files are immutable.
+- **Test restores are the whole point.** Do a real restore into a scratch project at least quarterly, and after any major Panoramax or Keycloak upgrade (PostGIS/Keycloak schema versions must match between dump and restore target). Run `restic check` weekly.
+- **Retention** is set in the `forget` flags (7 daily / 5 weekly / 12 monthly) — tune to taste. Images rely on `rclone copy` (additive) plus B2 versioning/lifecycle.
 - **Don't back up derivates or tmp** — ever. They're the free lunch here.
-```
+
