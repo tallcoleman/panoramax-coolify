@@ -69,6 +69,8 @@ Create a `backup/` folder in your repo. Working files are written under `/backup
 
 In this deployment every environment variable is configured directly in the **Coolify UI** for each service — there is no `.env` file on disk (`env.example` in the repo is documentation only). The block below shows the variable names to add for the `backup` service in Coolify; it is a reference, not a file to create.
 
+`RESTIC_PASSWORD`, `BACKUP_S3_ACCESS_KEY`, `BACKUP_S3_SECRET_KEY`, `BACKUP_S3_ENDPOINT`, `BACKUP_S3_BUCKET`, `FS_PERMANENT_URL`, `PG_PASSWORD`, `OAUTH_CLIENT_SECRET`, `FLASK_SECRET_KEY`, `KC_DB_PASSWORD`, and `KEYCLOAK_ADMIN_PASSWORD` are **required** — the compose snippet in §7.3 marks them with the `${VAR:?}` syntax (matching the rest of `docker-compose.yml`) so Coolify highlights them in red and the stack refuses to start with a clear error if any is left unset, rather than a backup silently failing at 2am. `BACKUP_S3_REGION`, `PGHOST`, and `PGUSER` stay optional — the scripts fall back to sensible defaults (`db`/`gvs`) or work fine blank on providers that ignore region.
+
 ```dotenv
 # ---------- Backup destination (S3-compatible) ----------
 BACKUP_S3_ACCESS_KEY=xxxx
@@ -256,24 +258,24 @@ CMD ["supercronic", "/etc/crontab"]
     restart: unless-stopped
     depends_on: [db]
     environment:
-      PG_PASSWORD: ${PG_PASSWORD}
-      PGHOST: ${PGHOST}
-      PGUSER: ${PGUSER}
-      OAUTH_CLIENT_SECRET: ${OAUTH_CLIENT_SECRET}
-      FLASK_SECRET_KEY: ${FLASK_SECRET_KEY}
-      KC_DB_PASSWORD: ${KC_DB_PASSWORD}
-      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
-      FS_PERMANENT_URL: ${FS_PERMANENT_URL}       # reused from the api/background-worker config
-      RESTIC_PASSWORD: ${RESTIC_PASSWORD}
-      RESTIC_REPOSITORY: s3:${BACKUP_S3_ENDPOINT}/${BACKUP_S3_BUCKET}/restic
-      AWS_ACCESS_KEY_ID: ${BACKUP_S3_ACCESS_KEY}      # restic's S3 backend reads these names
-      AWS_SECRET_ACCESS_KEY: ${BACKUP_S3_SECRET_KEY}
+      PG_PASSWORD: ${PG_PASSWORD:?}
+      PGHOST: ${PGHOST:-db}
+      PGUSER: ${PGUSER:-gvs}
+      OAUTH_CLIENT_SECRET: ${OAUTH_CLIENT_SECRET:?}
+      FLASK_SECRET_KEY: ${FLASK_SECRET_KEY:?}
+      KC_DB_PASSWORD: ${KC_DB_PASSWORD:?}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?}
+      FS_PERMANENT_URL: ${FS_PERMANENT_URL:?}     # reused from the api/background-worker config
+      RESTIC_PASSWORD: ${RESTIC_PASSWORD:?}
+      RESTIC_REPOSITORY: s3:${BACKUP_S3_ENDPOINT:?}/${BACKUP_S3_BUCKET:?}/restic
+      AWS_ACCESS_KEY_ID: ${BACKUP_S3_ACCESS_KEY:?}    # restic's S3 backend reads these names
+      AWS_SECRET_ACCESS_KEY: ${BACKUP_S3_SECRET_KEY:?}
       AWS_DEFAULT_REGION: ${BACKUP_S3_REGION}
-      BACKUP_S3_ACCESS_KEY: ${BACKUP_S3_ACCESS_KEY}   # used directly by backup-images.sh (rclone)
-      BACKUP_S3_SECRET_KEY: ${BACKUP_S3_SECRET_KEY}
-      BACKUP_S3_ENDPOINT: ${BACKUP_S3_ENDPOINT}
+      BACKUP_S3_ACCESS_KEY: ${BACKUP_S3_ACCESS_KEY:?} # used directly by backup-images.sh (rclone)
+      BACKUP_S3_SECRET_KEY: ${BACKUP_S3_SECRET_KEY:?}
+      BACKUP_S3_ENDPOINT: ${BACKUP_S3_ENDPOINT:?}
       BACKUP_S3_REGION: ${BACKUP_S3_REGION}
-      BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET}
+      BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET:?}
     volumes:
       - backup_scratch:/backups
       - kc_export:/backups/keycloak:ro          # from §5.4, if used
@@ -283,6 +285,8 @@ volumes:
 ```
 
 All of the `${...}` values above are Coolify UI environment variables for the `backup` service — set them there, not in a file. `RESTIC_REPOSITORY` and the `AWS_*` credentials are *derived* from `BACKUP_S3_*` rather than entered separately: restic's S3 backend reads the standard `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_DEFAULT_REGION` names for any S3-compatible endpoint, so the operator only enters the backup S3 credentials once.
+
+The `:?` suffix marks a variable as required, matching the convention used elsewhere in `docker-compose.yml`: Coolify highlights an unset required variable in red, and `docker compose up` refuses to start with a clear "variable is not set" error instead of silently passing an empty string into the container. Without it, a missing `RESTIC_PASSWORD` or `BACKUP_S3_*` value wouldn't fail until the first cron run — and possibly not until someone notices backups are missing weeks later. `BACKUP_S3_REGION` is left optional since many S3-compatible providers ignore it, and `PGHOST`/`PGUSER` default to the values used elsewhere in this stack (`db`/`gvs`).
 
 **First run:** initialise the restic repo once (from the backup container):
 `docker compose -p geovisio-auth exec backup restic init`. Then trigger a manual run to validate,
