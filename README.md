@@ -24,7 +24,11 @@ See `CHANGELOG.md` for a summary of changes made relative to the upstream exampl
 
 ## Deployment
 
-1. Copy `docker/full-keycloak-auth/env.example` to `docker/full-keycloak-auth/.env` and fill in all values.
+Follow the [instructions for a Coolify docker compose deployment](https://coolify.io/docs/applications/build-packs/docker-compose).
+
+Configuration notes:
+
+1. Use `docker/full-keycloak-auth/env.example` to help you set the appropriate environment variables in the Environment Variables menu.
 2. Point Coolify at this repository, set the compose file path to `docker/full-keycloak-auth/docker-compose.yml`.
 3. Deploy. Coolify/Traefik handles TLS; nginx routes internally on port 80.
 
@@ -34,7 +38,7 @@ On first deploy Keycloak will import the realm automatically. The `migrations` s
 
 ## Syncing with upstream
 
-The upstream deployment files live at `docker/full-keycloak-auth/` in the [panoramax/server/api](https://gitlab.com/panoramax/server/api) repo. Because this repo uses the same path, git can diff them directly.
+The upstream deployment files live at `docker/full-keycloak-auth/` in the [panoramax/server/api](https://gitlab.com/panoramax/server/api) repo on the `main` branch. Because this repo uses the same path, git can diff them directly.
 
 **One-time setup:**
 ```bash
@@ -44,17 +48,17 @@ git fetch upstream
 
 **See what changed upstream in the files this repo tracks:**
 ```bash
-git diff HEAD upstream/develop -- docker/full-keycloak-auth/
+git diff HEAD upstream/main -- docker/full-keycloak-auth/
 ```
 
 **Inspect a specific file:**
 ```bash
-git show upstream/develop:docker/full-keycloak-auth/nginx.conf
+git show upstream/main:docker/full-keycloak-auth/nginx.conf
 ```
 
 **Pull in a specific updated file:**
 ```bash
-git checkout upstream/develop -- docker/full-keycloak-auth/nginx.conf
+git checkout upstream/main -- docker/full-keycloak-auth/nginx.conf
 ```
 
 **Note:** `docker-compose.yml` will always show one intentional divergence in the diff — the top-level `x-base-geovisio` anchor uses `image: panoramax/api:${GEOVISIO_IMAGE_TAG:-latest}` here instead of a `build:` block, since this repo does not include the API source code. Any other diffs indicate upstream changes worth reviewing.

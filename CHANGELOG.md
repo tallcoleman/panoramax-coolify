@@ -1,6 +1,6 @@
 # Changelog
 
-All changes relative to the upstream [`docker/full-keycloak-auth`](https://gitlab.com/panoramax/server/api/-/tree/develop/docker/full-keycloak-auth) example. Changes by Ben Coleman.
+All changes relative to the upstream [`docker/full-keycloak-auth`](https://gitlab.com/panoramax/server/api/-/tree/develop/docker/full-keycloak-auth) example.
 
 ---
 
@@ -32,7 +32,6 @@ Coolify has several constraints that differ from plain Docker Compose:
 - **Host port binding removed from `reverseproxy`** — Traefik routes to the internal port; exposing it on the host caused conflicts.
 - **RFC 7239 `Forwarded` header stripped** — Traefik sets the `Forwarded` header (RFC 7239) but without a port, which caused Keycloak's `ForwardedHeadersParser` to log errors and misidentify the request origin. nginx now strips it before forwarding to Keycloak: `proxy_set_header Forwarded "";`
 - **`Host` header added to `/oauth` proxy block** — ensures Keycloak sees the correct hostname when constructing redirect URLs.
-- **nginx comment encoding fixed** — an em dash in a comment caused a character encoding issue that prevented the nginx container from starting.
 - **`reverseproxy` healthcheck added** — Coolify needs a health signal before marking the stack healthy.
 
 ---
@@ -40,7 +39,6 @@ Coolify has several constraints that differ from plain Docker Compose:
 ## Keycloak 26.x compatibility
 
 - **Auth healthcheck updated** — Keycloak 26's management health endpoints are not reliably available in this build configuration. The healthcheck now hits `/oauth/realms/master` over HTTP/1.0, which proves the database is up, the realm is loaded, and Keycloak is serving requests.
-- **`OAUTH_PROFILE_USE_IFRAME` reverted** — an upstream merge introduced this setting, which conflicted with Traefik/Coolify proxy header handling. Reverted to restore correct login flow.
 - **Login theme fixed** — the `geovisio` Keycloak client had `loginTheme: "base"` which rendered an unstyled login page. Corrected to `"keycloak"`.
 
 ---
@@ -70,7 +68,7 @@ Migrated from local filesystem storage to S3-compatible object storage:
 - **`WEBSITE_IMAGE_TAG`** introduced as a separate variable from `GEOVISIO_IMAGE_TAG` — the website image is on Docker Hub and needs its own tag; using the same variable caused incorrect image references when deploying non-DockerHub API images.
 - **`INFRA_NB_PROXIES=2`** set explicitly — with both Traefik (Coolify) and nginx in the request path before the API, two proxy hops must be declared so Flask trusts the correct `X-Forwarded-For` header for URL generation and rate limiting.
 - **`KC_DB_PASSWORD`** parameterised — replaced a hardcoded password in `1-init-keycloak-db.sh` and `docker-compose.yml` with the `KC_DB_PASSWORD` environment variable.
-- **`VITE_TITLE`, `VITE_META_TITLE`, `VITE_META_DESCRIPTION`** — made configurable via `env.example` with sensible defaults, instead of being hardcoded in the compose file.
+- **`VITE_TITLE`, `VITE_META_TITLE`, `VITE_META_DESCRIPTION`** — made configurable via environment variables with sensible defaults, instead of being hardcoded in the compose file.
 
 ---
 
