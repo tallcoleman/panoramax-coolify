@@ -131,6 +131,10 @@ restic forget --host panoramax --tag db \
   --keep-weekly "${RESTIC_KEEP_WEEKLY:-5}" \
   --keep-monthly "${RESTIC_KEEP_MONTHLY:-12}" \
   --prune
+
+# 4) Success marker for the container healthcheck (§7.3) — only reached if
+#    everything above exited zero, thanks to `set -eu`.
+touch /backups/.ok-db
 ```
 
 ### 5.3 `backup/backup-images.sh` — production S3 → backup S3 (permanent only)
@@ -162,6 +166,9 @@ DST=":s3,provider=Other,access_key_id=${BACKUP_S3_ACCESS_KEY},secret_access_key=
 # production are retained. Swap to 'sync' only if you want an exact mirror.
 rclone copy "$SRC" "$DST" \
   --transfers 16 --checkers 32 --fast-list --stats-one-line
+
+# Success marker for the container healthcheck (§7.3).
+touch /backups/.ok-images
 ```
 
 Note we deliberately reference only the **permanent** prefix — `derivates/` and `tmp/` are never touched. That is the space saving. This parsing assumes `FS_PERMANENT_URL` uses the `s3://` scheme shown above; if your production storage uses a different PyFilesystem backend, build `SRC` manually instead.
@@ -217,6 +224,9 @@ restic forget --host panoramax --tag config \
   --keep-weekly "${RESTIC_KEEP_WEEKLY:-5}" \
   --keep-monthly "${RESTIC_KEEP_MONTHLY:-12}" \
   --prune
+
+# Success marker for the container healthcheck (§7.3).
+touch /backups/.ok-config
 ```
 
 > `docker-compose.yml`, `keycloak-realm.json`, and themes are already in git and don't need backing up here — a rebuild just re-deploys the repo in Coolify. The irreplaceable pieces are the secret values above (`FLASK_SECRET_KEY`, `OAUTH_CLIENT_SECRET`, `PG_PASSWORD`, `KC_DB_PASSWORD`, `KEYCLOAK_ADMIN_PASSWORD`), which live solely in Coolify's env var store. Keeping an encrypted copy in restic means a full rebuild needs nothing that isn't backed up.
@@ -284,6 +294,21 @@ exec supercronic /etc/crontab
 
 ### 7.3 compose service (add to `docker-compose.yml`)
 
+**`backup/backup-healthcheck.sh`** — the container's health status shouldn't just mean "the cron daemon is alive": supercronic will happily keep running for weeks while `restic backup` fails every night on a bad credential. Instead, each script from §5 touches a marker file on success (last line of `backup-images.sh`/`backup-db.sh`/`backup-config.sh`), and the healthcheck asserts each marker exists and isn't stale:
+
+```sh
+#!/bin/sh
+set -eu
+MAX_AGE_MIN=1560   # 26h — a bit past the daily cadence, so the 2am run isn't flagged as stale
+for marker in /backups/.ok-images /backups/.ok-db /backups/.ok-config; do
+  [ -f "$marker" ] || exit 1
+  find "$marker" -mmin +"$MAX_AGE_MIN" -print -quit | grep -q . && exit 1
+done
+exit 0
+```
+
+This uses `find -mmin` (not `stat`) so it works unmodified against BusyBox's `find` in the Alpine base image. A missing marker (nothing has ever succeeded) or a stale one (something's been failing) both report unhealthy; the compose `healthcheck:` block's `start_period` below absorbs the first day before any backup has had a chance to run.
+
 ```yaml
   backup:
     build: ./backup
@@ -315,6 +340,12 @@ exec supercronic /etc/crontab
       RESTIC_KEEP_DAILY: ${RESTIC_KEEP_DAILY:-7}
       RESTIC_KEEP_WEEKLY: ${RESTIC_KEEP_WEEKLY:-5}
       RESTIC_KEEP_MONTHLY: ${RESTIC_KEEP_MONTHLY:-12}
+    healthcheck:
+      test: ["CMD", "backup-healthcheck.sh"]
+      interval: 1h
+      timeout: 10s
+      retries: 1
+      start_period: 26h
     volumes:
       - backup_scratch:/backups
       - kc_export:/backups/keycloak:ro          # from §5.4, if used
@@ -328,6 +359,8 @@ All of the `${...}` values above are Coolify UI environment variables for the `b
 The `:?` suffix marks a variable as required, matching the convention used elsewhere in `docker-compose.yml`: Coolify highlights an unset required variable in red, and `docker compose up` refuses to start with a clear "variable is not set" error instead of silently passing an empty string into the container. Without it, a missing `RESTIC_PASSWORD` or `BACKUP_S3_*` value wouldn't fail until the first cron run — and possibly not until someone notices backups are missing weeks later. `BACKUP_S3_REGION` is left optional since many S3-compatible providers ignore it, and `PGHOST`/`PGUSER` default to the values used elsewhere in this stack (`db`/`gvs`).
 
 `BACKUP_CRON_*` and `RESTIC_KEEP_*` are all optional, defaulting to today's fixed schedule (02:00/02:30/02:45 nightly, weekly integrity check) and retention (7 daily / 5 weekly / 12 monthly). Changing a `RESTIC_KEEP_*` value takes effect on the next scheduled run with no rebuild — just edit the Coolify env var and restart the container. Changing a `BACKUP_CRON_*` value also just needs a restart, but since `entrypoint.sh` renders `/etc/crontab` at container startup, a malformed cron expression will crash-loop the container until fixed (see §7.2) — check the container logs after changing a schedule.
+
+Nothing else `depends_on` the `backup` service, so the `healthcheck:` block above doesn't gate any other container's startup — it exists purely so Coolify's UI surfaces "backups have stopped succeeding" instead of showing a container that's merely running. `backup-healthcheck.sh` is picked up automatically by the Dockerfile's `COPY *.sh` (§7.1), no separate wiring needed.
 
 **First run:** initialise the restic repo once (from the backup container):
 `docker compose -p geovisio-auth exec backup restic init`. Then trigger a manual run to validate,
