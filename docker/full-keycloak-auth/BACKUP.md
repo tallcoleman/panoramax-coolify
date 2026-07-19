@@ -32,6 +32,19 @@ Two tools:
 
 Both run inside one small **`backup` sidecar** container defined in your compose file, driven by [`supercronic`](https://github.com/aptible/supercronic) (a container-friendly cron). Credentials are declared in code; schedule and retention are also declared in code but overridable via environment variables with sensible defaults (see §7.2 and §7.3).
 
+### Running Commands in Docker
+
+Several of these steps require running commands in one of the docker containers being run by the service. Coolify appends unique IDs to the container names on each deployment, so you will need to find the container name or ID before you can run a command. The beginning of the container name will be the same as the service name in the docker compose file; you can also double check you have the right container by looking at the "logs" menu in Coolify.
+
+If you want to modify the information shown by this command, see the [docker ps documentation](https://docs.docker.com/reference/cli/docker/container/ls/):
+
+```bash
+# list running containers
+docker ps --format "table {{.ID}}\t{{.CreatedAt}}\t{{.Names}}"
+```
+
+Alternatively, you can connect to a shell inside any running container by using the "terminal" menu in the Coolify UI. In this case, just run the portion of the command that comes after `... exec <container_name>`.
+
 ---
 
 ## 3. Confirm how Keycloak stores its data (one command)
@@ -39,7 +52,7 @@ Both run inside one small **`backup` sidecar** container defined in your compose
 In this compose, Keycloak shares the **`geovisio` database** with the API but stores its tables in a dedicated **`keycloak` schema** (`KC_DB_SCHEMA: keycloak`, `KC_DB_URL: jdbc:postgresql://db/geovisio`). Because `pg_dump geovisio` captures all schemas by default, the database backup in §5 already covers Keycloak completely — there is only one database to back up. Confirm it:
 
 ```bash
-docker compose -p geovisio-auth exec db \
+docker exec <db_container_name> \
   psql -U gvs -d geovisio -Atc "SELECT schema_name FROM information_schema.schemata;"
 ```
 
@@ -384,18 +397,14 @@ The `:?` suffix marks a variable as required, matching the convention used elsew
 
 Nothing else `depends_on` the `backup` service, so the `healthcheck:` block above doesn't gate any other container's startup — it exists purely so Coolify's UI surfaces "backups have stopped succeeding" instead of showing a container that's merely running. `backup-healthcheck.sh` is picked up automatically by the Dockerfile's `COPY *.sh` (§7.1), no separate wiring needed.
 
-**First run:** `entrypoint.sh` initialises the restic repo automatically on container startup if it isn't already (it runs `restic snapshots` to detect an existing repo, falling back to `restic init` if that fails) — no manual step needed. After first deploy, trigger a manual run to validate, e.g. `docker compose -p geovisio-auth exec backup backup-db.sh`.
+**First run:** `entrypoint.sh` initialises the restic repo automatically on container startup if it isn't already (it runs `restic snapshots` to detect an existing repo, falling back to `restic init` if that fails) — no manual step needed. After first deploy, trigger a manual run to validate, e.g. `docker exec <backup_container_name> backup-db.sh`.
 
 ### 7.4 One-off backups
 
 The nightly schedule (§7.2) doesn't need to be the only way a backup runs. `backup/backup-now.sh` runs all three jobs back-to-back, in the same order as the cron schedule (images, then db, then config — see §10 on why that order matters):
 
 ```bash
-# from the server - backup container name can be found in the logs menu in Coolify
-sudo docker exec <backup_container_name_or_id> backup-now.sh
-
-# using 'terminal' from the Coolify UI when connected to the backup container
-backup-now.sh
+docker exec <backup_container_name> backup-now.sh
 ```
 
 Like the individual scripts, it uses `set -eu` with no error suppression, so it stops at the first failing step rather than continuing on to the next. It doesn't touch `crontab.template` or the container's cron schedule — it's purely an extra, manually-invoked entrypoint alongside the automated one. Useful before/after a risky change, or to validate the backup pipeline without waiting for 2am.
@@ -471,7 +480,7 @@ Leave `derivates/` and `tmp/` empty.
 - `PREPROCESS` + direct-S3 serving: run a warm-up so the cache is rebuilt from the HD originals:
 ```bash
 # list picture ids, then request each derivate once to force regeneration
-docker compose -p geovisio-auth exec db \
+docker exec <db_container_name> \
   psql -U gvs -d geovisio -Atc "SELECT id FROM pictures;" \
 | while read id; do
     curl -fsS -o /dev/null "https://<your-domain>/api/pictures/$id/sd.jpg"    || true
