@@ -276,6 +276,7 @@ services:
   backup:
     build: ./backup
     restart: unless-stopped
+    init: true          # tini as PID 1; supercronic runs with -no-reap (see entrypoint.sh)
     depends_on: [db]
     environment:
       PG_PASSWORD: ${PG_PASSWORD:?}
