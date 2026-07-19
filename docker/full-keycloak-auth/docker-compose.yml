@@ -70,9 +70,17 @@ services:
         condition: service_healthy
     healthcheck:
       # Health endpoints are not reliably available in this Keycloak 26 build.
-      # The master realm endpoint is a solid readiness signal: it proves the DB is up,
-      # the realm is loaded, and Keycloak is serving requests.
-      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8080; printf 'GET /oauth/realms/master HTTP/1.0\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3; timeout 3 grep -m1 'HTTP/1.0 200' <&3"]
+      # This used to send a real GET to /oauth/realms/master and check for a
+      # 200 (proving the DB is up, the realm is loaded, and Keycloak is
+      # actually serving) — but that only succeeds once realm import fully
+      # finishes, and observed startup + import time exceeded some restart
+      # supervisor's timeout on Coolify (well under docker-compose's own
+      # start_period), causing an endless restart loop before the app ever
+      # got a chance to become ready. Downgraded to a bare TCP-connect check,
+      # which succeeds as soon as the port is listening — a liveness check,
+      # not a true readiness check. Dependents (e.g. website) may see a few
+      # seconds of 503s from auth immediately after it's marked healthy.
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8080 && exec 3<&-"]
       timeout: 5s
       interval: 5s
       retries: 5
