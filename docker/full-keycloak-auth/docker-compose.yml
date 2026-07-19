@@ -22,16 +22,39 @@ x-base-keycloak: &keycloak-build
     dockerfile: Dockerfile.keycloak
 
 services:
-  auth:
+  # One-shot: imports keycloak-realm.json into a fresh/empty keycloak schema,
+  # then exits. Split out from `auth`'s own startup because `start
+  # --import-realm` triggers Keycloak's own internal server restart after
+  # import completes — normally harmless (the next boot finds the realm
+  # already there and skips re-importing), but on a fresh deploy that
+  # self-restart can happen before the import's DB write actually commits,
+  # so the next boot still finds no realm, imports again, restarts again,
+  # forever. Running the import here as a plain `kc.sh import` (non-server
+  # mode, same pattern as keycloak-export) avoids that restart path
+  # entirely; `auth` then starts normally with the realm already present.
+  keycloak-import:
     <<: *keycloak-build
-    command: start --optimized --import-realm
-    labels:
-      - "traefik.enable=false"
+    command: import --optimized --dir /opt/keycloak/data/import --override false
+    restart: "no"
+    exclude_from_hc: true
     environment:
       # Placeholders in keycloak-realm.json
       GEOVISIO_BASE_URL: https://${DOMAIN:?}
       GEOVISIO_CLIENT_SECRET: ${OAUTH_CLIENT_SECRET:?}
+      KC_DB_USERNAME: keycloak_user
+      KC_DB_PASSWORD: ${KC_DB_PASSWORD:?}
+      KC_DB_SCHEMA: keycloak
+      KC_DB_URL: jdbc:postgresql://db/geovisio
+    depends_on:
+      db:
+        condition: service_healthy
 
+  auth:
+    <<: *keycloak-build
+    command: start --optimized
+    labels:
+      - "traefik.enable=false"
+    environment:
       # Keycloak admin account
       KC_BOOTSTRAP_KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:-admin}
       KC_BOOTSTRAP_KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?}
@@ -68,6 +91,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      keycloak-import:
+        condition: service_completed_successfully
     healthcheck:
       # Health endpoints are not reliably available in this Keycloak 26 build.
       # This used to send a real GET to /oauth/realms/master and check for a
@@ -96,17 +121,16 @@ services:
     exclude_from_hc: true
     labels:
       - "traefik.enable=false"
-    # On a fresh/empty keycloak schema, this can race auth's own Liquibase
-    # migration (both containers migrate on boot) and fail with "relation
-    # databasechangelog already exists". Not gated on auth's health here —
-    # auth's healthcheck is known-flaky (see its healthcheck comment below),
-    # and depends_on: condition: service_healthy would turn that flakiness
-    # into a hard deploy failure. Instead, kc.sh export's non-zero exit
-    # (set -eu in keycloak-export-loop.sh) triggers restart: unless-stopped,
-    # and the race is gone by the next retry once auth's migration is done.
+    # Gated on keycloak-import completing (not auth's health) so it never
+    # races the realm import — service_completed_successfully is a safe hard
+    # dependency here since keycloak-import is a one-shot job that reliably
+    # terminates, unlike gating on auth's own (known-flaky) healthcheck.
+    # keycloak-export-loop.sh also retries internally as a defensive fallback.
     depends_on:
       db:
         condition: service_healthy
+      keycloak-import:
+        condition: service_completed_successfully
     environment:
       # Only the DB connection is needed — no HTTP/proxy/SMTP config, since the
       # live server isn't involved.
