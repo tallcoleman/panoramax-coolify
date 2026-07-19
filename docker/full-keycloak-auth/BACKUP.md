@@ -440,25 +440,53 @@ Assumes a fresh Coolify host and empty S3.
 restic restore latest --tag config --target /tmp/restore
 # review /tmp/restore/config/secrets.env
 ```
+This step only produces `secrets.env` for manual copy-paste into the Coolify UI, so it can be run
+from **any machine** with `restic` installed and network access to the backup S3 endpoint — an
+operator's own laptop works fine, no need to be on the Coolify host for this part.
+
 Recreate the stack in Coolify from your git repo (docker-compose.yml, keycloak-realm.json, and themes come from there, not from restic), then paste the values from `secrets.env` back into the Coolify UI's environment variables for the relevant services.
 
-**2. Bring up Postgres only**, then restore databases into empty targets (PostGIS wants the extension present before data loads):
+**2. Deploy the full stack, then restore the databases.**
+
+Deploy the whole stack from git — don't try to isolate Postgres. This compose file has a
+`migrations` service (`db-upgrade`, `restart: "no"`) that `api` waits on via
+`condition: service_completed_successfully`, and `auth` runs `start --optimized --import-realm`.
+Both run automatically on a fresh deploy and create the `geovisio` and `keycloak` schemas —
+empty of rows, but not empty databases. This is expected: `api`/`background-worker`/website will
+come up successfully with no data, not crash-loop.
+
+Because those schemas already exist, restoring into them means **overwriting** existing (empty)
+objects rather than creating fresh ones — skip `CREATE DATABASE`/`CREATE EXTENSION`, and pass
+`--clean --if-exists` to `pg_restore` so it drops the pre-existing empty objects before recreating
+them from the dump.
+
+Run the restore itself inside the running **`backup`** container — it already bundles `restic`,
+`psql`, and `pg_restore` (§7.1) and sits on the same Docker network as `db`, so no extra tooling
+or file-copying between machines is needed:
+
+```bash
+docker exec <backup_container_name> sh
+```
+
+then, inside that shell:
+
 ```bash
 restic restore latest --tag db --target /tmp/restore   # -> /tmp/restore/pg/*.dump, globals.sql
 
 # roles (if the gvs role isn't already created by the image)
 psql -h db -U gvs -d postgres -f /tmp/restore/pg/globals.sql   # ignore "already exists"
 
-# geovisio
-psql -h db -U gvs -d postgres -c "CREATE DATABASE geovisio;"
-psql -h db -U gvs -d geovisio -c "CREATE EXTENSION IF NOT EXISTS postgis;"
-pg_restore -h db -U gvs -d geovisio --no-owner /tmp/restore/pg/geovisio.dump   # test flags on your data
+# geovisio — schema already exists (created by the migrations service), so overwrite it
+pg_restore -h db -U gvs -d geovisio --no-owner --clean --if-exists /tmp/restore/pg/geovisio.dump
 
-# keycloak (only if it was co-located)
-psql -h db -U gvs -d postgres -c "CREATE DATABASE keycloak;"
-pg_restore -h db -U gvs -d keycloak --no-owner /tmp/restore/pg/keycloak.dump
+# keycloak (only if it was co-located) — schema already exists (created by auth's --import-realm)
+pg_restore -h db -U gvs -d keycloak --no-owner --clean --if-exists /tmp/restore/pg/keycloak.dump
 ```
 *(If you prefer the portable route for Keycloak: skip the keycloak dump and instead start a clean Keycloak with `--import-realm` pointing at the exported `geovisio-realm.json` from §5.4.)*
+
+Once both dumps are restored, restart/redeploy the `api`, `auth`, and `background-worker` services
+in Coolify so they pick up the restored data rather than relying on any live connections or
+caches from before the restore.
 
 **3. Restore images.** Repopulate production S3 from the backup S3 (or point the instance at the backup S3 temporarily), using the same connection-string style as §5.3/§8:
 ```bash
@@ -469,15 +497,20 @@ rclone copy "$BACKUP" "$PROD" --transfers 16 --fast-list
 ```
 Leave `derivates/` and `tmp/` empty.
 
-**4. Start the rest** of the stack (keycloak → api → background-worker → website).
+**4. Confirm the stack is healthy.** The full stack was already deployed in step 2 and restarted
+after the DB restore, so there's nothing further to start here — just confirm `auth`, `api`,
+`background-worker`, and the website are all up in Coolify.
 
 **5. Refresh cached DB views:**
 `docker compose -p geovisio-auth run --rm --entrypoint bash api -c 'panoramax_backend db refresh'`
 (the background worker also does this on `PICTURE_PROCESS_REFRESH_CRON`).
 
 **6. Derivates.**
-- `ON_DEMAND`: nothing to do — they rebuild as pictures are viewed.
-- `PREPROCESS` + direct-S3 serving: run a warm-up so the cache is rebuilt from the HD originals:
+
+This deployment hard-codes `PICTURE_PROCESS_DERIVATES_STRATEGY: PREPROCESS` and serves derivates
+directly from S3 via `API_DERIVATES_PICTURES_PUBLIC_URL` — the API isn't in the request path, so
+missing derivates won't self-heal (see §6). The warm-up crawl below is **required** after every
+restore on this stack, not optional:
 ```bash
 # list picture ids, then request each derivate once to force regeneration
 docker exec <db_container_name> \
