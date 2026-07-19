@@ -382,9 +382,7 @@ The `:?` suffix marks a variable as required, matching the convention used elsew
 
 Nothing else `depends_on` the `backup` service, so the `healthcheck:` block above doesn't gate any other container's startup — it exists purely so Coolify's UI surfaces "backups have stopped succeeding" instead of showing a container that's merely running. `backup-healthcheck.sh` is picked up automatically by the Dockerfile's `COPY *.sh` (§7.1), no separate wiring needed.
 
-**First run:** initialise the restic repo once (from the backup container):
-`docker compose -p geovisio-auth exec backup restic init`. Then trigger a manual run to validate,
-e.g. `docker compose -p geovisio-auth exec backup backup-db.sh`.
+**First run:** `entrypoint.sh` initialises the restic repo automatically on container startup if it isn't already (it runs `restic snapshots` to detect an existing repo, falling back to `restic init` if that fails) — no manual step needed. After first deploy, trigger a manual run to validate, e.g. `docker compose -p geovisio-auth exec backup backup-db.sh`.
 
 ### 7.4 One-off backups
 
