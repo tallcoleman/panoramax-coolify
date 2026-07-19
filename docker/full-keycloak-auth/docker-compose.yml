@@ -88,14 +88,16 @@ services:
     exclude_from_hc: true
     labels:
       - "traefik.enable=false"
-    # Waits on auth (not just db) so it never races auth's Liquibase migration
-    # against a fresh/empty keycloak schema — both containers migrate on boot,
-    # and running them concurrently against an empty schema fails with
-    # "relation databasechangelog already exists" as they race to create it.
+    # On a fresh/empty keycloak schema, this can race auth's own Liquibase
+    # migration (both containers migrate on boot) and fail with "relation
+    # databasechangelog already exists". Not gated on auth's health here —
+    # auth's healthcheck is known-flaky (see its healthcheck comment below),
+    # and depends_on: condition: service_healthy would turn that flakiness
+    # into a hard deploy failure. Instead, kc.sh export's non-zero exit
+    # (set -eu in keycloak-export-loop.sh) triggers restart: unless-stopped,
+    # and the race is gone by the next retry once auth's migration is done.
     depends_on:
       db:
-        condition: service_healthy
-      auth:
         condition: service_healthy
     environment:
       # Only the DB connection is needed — no HTTP/proxy/SMTP config, since the
