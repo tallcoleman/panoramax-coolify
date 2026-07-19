@@ -14,7 +14,9 @@ KC_DB_PASSWORD=${KC_DB_PASSWORD}
 KEYCLOAK_ADMIN_PASSWORD=${KEYCLOAK_ADMIN_PASSWORD}
 EOF
 
-restic backup --host panoramax --tag config "$OUT"
+# /backups/keycloak is the kc_export volume, populated by the keycloak-export
+# service (BACKUP.md §5.4) — bundled here so both land in the same nightly restic run.
+restic backup --host panoramax --tag config "$OUT" /backups/keycloak
 restic forget --host panoramax --tag config \
   --keep-daily "${RESTIC_KEEP_DAILY:-7}" \
   --keep-weekly "${RESTIC_KEEP_WEEKLY:-5}" \

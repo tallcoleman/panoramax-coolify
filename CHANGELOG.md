@@ -104,7 +104,20 @@ SMTP variables (`SMTP_HOST`, `SMTP_FROM`, `SMTP_USER`, `SMTP_PASSWORD`) are left
 The `backup/` sidecar described in `BACKUP.md` §5/§7 is now wired into the stack:
 
 - **New `backup/` directory** — `Dockerfile` (Alpine + restic, rclone, `postgresql16-client`, `supercronic`), `entrypoint.sh` (renders the cron schedule from env vars via `envsubst`), `crontab.template`, and the backup scripts (`backup-db.sh`, `backup-images.sh`, `backup-config.sh`, `backup-healthcheck.sh`, `restic-check.sh`).
-- **`docker-compose.yml`** — added the `backup` service (restic repository derived from `BACKUP_S3_*`, all required secrets/credentials reused rather than re-entered), a `backup_scratch` volume for working files, and a `kc_export` volume shared with `auth` so a Coolify Scheduled Task can trigger `kc.sh export` for the portable Keycloak realm snapshot.
+- **`docker-compose.yml`** — added the `backup` service (restic repository derived from `BACKUP_S3_*`, all required secrets/credentials reused rather than re-entered), a `backup_scratch` volume for working files, and a `kc_export` volume for the portable Keycloak realm snapshot (see "Keycloak realm export automated" below).
 - **`env.example`** — documented the new `BACKUP_S3_*`, `RESTIC_PASSWORD`, `PGHOST`/`PGUSER`, `BACKUP_CRON_*`, and `RESTIC_KEEP_*` variables.
 
-Out of scope (operational, not code): the weekly HDD copy (§8), the disaster-recovery runbook (§9), and configuring the actual Coolify Scheduled Task for the Keycloak realm export.
+Out of scope (operational, not code): the weekly HDD copy (§8) and the disaster-recovery runbook (§9).
+
+---
+
+## Keycloak realm export automated
+
+`BACKUP.md` §5.4 originally called for a Coolify Scheduled Task to trigger `kc.sh export` — the one manual step in an otherwise all-code backup setup. Replaced with a code-only approach:
+
+- **New `keycloak-export-loop.sh`** — a sleep-loop entrypoint that calls `kc.sh export --optimized --dir /export --users realm_file --realm geovisio` once at startup and then every `KC_EXPORT_INTERVAL_SECONDS` (default daily). `kc.sh export` reads directly from Postgres and doesn't need the live HTTP server, so this runs as its own sidecar rather than inside the running `auth` process.
+- **`Dockerfile.keycloak`** — copies the loop script into the image (`COPY --chmod=755`); the default `auth` entrypoint/command is unaffected.
+- **`docker-compose.yml`** — added a `keycloak-export` service reusing the `auth` service's build (via a new `x-base-keycloak` anchor) but overriding the entrypoint to the export loop and running with only the DB connection env vars it actually needs. Runs as `user: "0:0"` — the `kc_export` named volume is root-owned by default and Keycloak's image runs as uid 1000, which can't write to it otherwise; this container never listens on a port and only invokes the CLI export, so the tradeoff is low-risk.
+- **`backup/backup-config.sh`** — the restic `config` backup now also includes `/backups/keycloak` (the read-only `kc_export` mount), so the realm snapshot ships in the same nightly run as the secrets it already backs up.
+
+A dedicated Keycloak-based sidecar was necessary rather than folding this into the existing Alpine `backup` container: `kc.sh export` requires the full Keycloak/Quarkus JVM runtime built for glibc, which can't be cleanly embedded in the musl-based Alpine image without re-basing it entirely.

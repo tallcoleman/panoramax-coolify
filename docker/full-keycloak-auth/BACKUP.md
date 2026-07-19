@@ -100,6 +100,10 @@ BACKUP_CRON_CHECK=0 4 * * 0
 RESTIC_KEEP_DAILY=7
 RESTIC_KEEP_WEEKLY=5
 RESTIC_KEEP_MONTHLY=12
+
+# ---------- Keycloak realm export cadence (optional, seconds, default shown) ----------
+# Set on the `keycloak-export` service (§5.4), not `backup` — listed here for completeness.
+KC_EXPORT_INTERVAL_SECONDS=86400
 ```
 
 ### 5.2 `backup/backup-db.sh` — Postgres (geovisio + keycloak + roles)
@@ -173,23 +177,31 @@ touch /backups/.ok-images
 
 Note we deliberately reference only the **permanent** prefix — `derivates/` and `tmp/` are never touched. That is the space saving. This parsing assumes `FS_PERMANENT_URL` uses the `s3://` scheme shown above; if your production storage uses a different PyFilesystem backend, build `SRC` manually instead.
 
-### 5.4 `backup/backup-keycloak.sh` — portable realm export (optional but recommended)
+### 5.4 `keycloak-export` service — portable realm export (optional but recommended)
 
 If Keycloak is co-located in the shared Postgres (§3), the DB dump already backs it up fully and this is a **bonus** portable/human-readable snapshot. `kc.sh export` includes users **and** password hashes, so it can fully rebuild the realm on a clean Keycloak.
 
-The clean, socket-free way is to let Keycloak write the export to a **shared named volume** that the backup container also mounts, then let restic pick it up. Trigger the export with a Coolify Scheduled Task on the `keycloak` container:
-
-```bash
-# Coolify Scheduled Task → container: keycloak → schedule: 0 3 * * *
-/opt/keycloak/bin/kc.sh export --dir /export --users realm_file --realm geovisio
-```
-
-…where the compose gives both services a shared volume:
+`kc.sh export` reads directly from Postgres — it doesn't need the live HTTP server — so rather than a manual Coolify Scheduled Task, it runs as its own lightweight sidecar service (`keycloak-export`), reusing the same `Dockerfile.keycloak` build as `auth` but overriding the entrypoint with a sleep-loop (`keycloak-export-loop.sh`) instead of starting the server. This keeps the export fully in code, with nothing to configure outside the repo:
 
 ```yaml
-  keycloak:
+  auth:
+    <<: *keycloak-build
+    command: start --optimized --import-realm
+    # ...
+
+  keycloak-export:
+    <<: *keycloak-build
+    entrypoint: ["/usr/local/bin/keycloak-export-loop.sh"]
+    environment:
+      KC_DB_USERNAME: keycloak_user
+      KC_DB_PASSWORD: ${KC_DB_PASSWORD:?}
+      KC_DB_SCHEMA: keycloak
+      KC_DB_URL: jdbc:postgresql://db/geovisio
+      KC_EXPORT_INTERVAL_SECONDS: ${KC_EXPORT_INTERVAL_SECONDS:-86400}
+    user: "0:0"   # named volumes are root-owned; Keycloak's default uid 1000 can't write to /export otherwise
     volumes:
       - kc_export:/export
+
   backup:
     volumes:
       - kc_export:/backups/keycloak:ro
@@ -197,7 +209,13 @@ volumes:
   kc_export:
 ```
 
-The nightly restic run (below) then includes `/backups/keycloak`. `kc.sh export` runs as a one-shot command and does not bind the HTTP port, so it's safe alongside the running server — but test it once on your version.
+`keycloak-export-loop.sh` runs the export once at container start and then every `KC_EXPORT_INTERVAL_SECONDS` (default 86400 = daily):
+
+```sh
+/opt/keycloak/bin/kc.sh export --dir /export --users realm_file --realm geovisio
+```
+
+`backup-config.sh` (§5.5) picks up `/backups/keycloak` alongside the secrets it already ships, so both land in the same nightly restic run.
 
 ### 5.5 `backup/backup-config.sh` — secrets
 
@@ -218,7 +236,9 @@ KC_DB_PASSWORD=${KC_DB_PASSWORD}
 KEYCLOAK_ADMIN_PASSWORD=${KEYCLOAK_ADMIN_PASSWORD}
 EOF
 
-restic backup --host panoramax --tag config "$OUT"
+# /backups/keycloak is the kc_export volume, populated by the keycloak-export
+# service (§5.4) — bundled here so both land in the same nightly restic run.
+restic backup --host panoramax --tag config "$OUT" /backups/keycloak
 restic forget --host panoramax --tag config \
   --keep-daily "${RESTIC_KEEP_DAILY:-7}" \
   --keep-weekly "${RESTIC_KEEP_WEEKLY:-5}" \
@@ -348,7 +368,7 @@ This uses `find -mmin` (not `stat`) so it works unmodified against BusyBox's `fi
       start_period: 26h
     volumes:
       - backup_scratch:/backups
-      - kc_export:/backups/keycloak:ro          # from §5.4, if used
+      - kc_export:/backups/keycloak:ro          # populated by keycloak-export, see §5.4
 volumes:
   backup_scratch:
   kc_export:

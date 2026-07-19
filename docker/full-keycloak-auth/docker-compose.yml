@@ -16,11 +16,14 @@ x-base-geovisio-env: &geovisio-default-env
   # Override the FS_URL default baked into the pre-built image; the split S3 variables are used instead
   FS_URL: ""
 
+x-base-keycloak: &keycloak-build
+  build:
+    context: .
+    dockerfile: Dockerfile.keycloak
+
 services:
   auth:
-    build:
-      context: .
-      dockerfile: Dockerfile.keycloak
+    <<: *keycloak-build
     command: start --optimized --import-realm
     labels:
       - "traefik.enable=false"
@@ -74,8 +77,35 @@ services:
       interval: 5s
       retries: 5
       start_period: 60s
+
+  # Periodically runs `kc.sh export` against the same DB, without needing the
+  # live HTTP server — see BACKUP.md §5.4. Its output on kc_export is picked up
+  # by backup-config.sh (§5.5) alongside the secrets it already ships.
+  keycloak-export:
+    <<: *keycloak-build
+    entrypoint: ["/usr/local/bin/keycloak-export-loop.sh"]
+    restart: unless-stopped
+    exclude_from_hc: true
+    labels:
+      - "traefik.enable=false"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # Only the DB connection is needed — no HTTP/proxy/SMTP config, since the
+      # live server isn't involved.
+      KC_DB_USERNAME: keycloak_user
+      KC_DB_PASSWORD: ${KC_DB_PASSWORD:?}
+      KC_DB_SCHEMA: keycloak
+      KC_DB_URL: jdbc:postgresql://db/geovisio
+      KC_EXPORT_INTERVAL_SECONDS: ${KC_EXPORT_INTERVAL_SECONDS:-86400}
+    # Named volumes are root-owned by default; Keycloak's image runs as uid 1000,
+    # which can't write to /export otherwise. This container never listens on a
+    # port and only invokes the CLI export, so running as root is low-risk here.
+    user: "0:0"
     volumes:
       - kc_export:/export
+
   migrations:
     <<: *geovisio-default
     command: db-upgrade
@@ -281,7 +311,7 @@ services:
       start_period: 26h
     volumes:
       - backup_scratch:/backups
-      - kc_export:/backups/keycloak:ro          # from §5.4, if used
+      - kc_export:/backups/keycloak:ro          # populated by keycloak-export, see §5.4
 
 volumes:
   postgres_data:
