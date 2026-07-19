@@ -163,8 +163,10 @@ endpoint_enc=$(echo "$query" | sed -n 's/.*endpoint_url=\([^&]*\).*/\1/p')
 SRC_ENDPOINT=$(printf '%b' "$(echo "$endpoint_enc" | sed 's/%/\\x/g')")
 SRC_REGION=$(echo "$query" | sed -n 's/.*region=\([^&]*\).*/\1/p')
 
-SRC=":s3,provider=Other,access_key_id=${SRC_ACCESS_KEY},secret_access_key=${SRC_SECRET_KEY},endpoint=${SRC_ENDPOINT},region=${SRC_REGION}:${SRC_BUCKET_PATH}"
-DST=":s3,provider=Other,access_key_id=${BACKUP_S3_ACCESS_KEY},secret_access_key=${BACKUP_S3_SECRET_KEY},endpoint=${BACKUP_S3_ENDPOINT},region=${BACKUP_S3_REGION}:${BACKUP_S3_BUCKET}/images/permanent"
+# endpoint/region are single-quoted: they may contain ':' (e.g. "https://host")
+# which would otherwise be misread as the connection-string/path separator.
+SRC=":s3,provider=Other,access_key_id=${SRC_ACCESS_KEY},secret_access_key=${SRC_SECRET_KEY},endpoint='${SRC_ENDPOINT}',region='${SRC_REGION}':${SRC_BUCKET_PATH}"
+DST=":s3,provider=Other,access_key_id=${BACKUP_S3_ACCESS_KEY},secret_access_key=${BACKUP_S3_SECRET_KEY},endpoint='${BACKUP_S3_ENDPOINT}',region='${BACKUP_S3_REGION}':${BACKUP_S3_BUCKET}/images/permanent"
 
 # 'copy' is additive: it never deletes from the backup, so originals removed in
 # production are retained. Swap to 'sync' only if you want an exact mirror.
@@ -405,7 +407,7 @@ Like the individual scripts, it uses `set -eu` with no error suppression, so it 
 Both prefixes copy down cleanly using the same rclone connection-string style as §5.3 (substitute your `BACKUP_S3_*` values):
 
 ```bash
-BACKUP=":s3,provider=Other,access_key_id=${BACKUP_S3_ACCESS_KEY},secret_access_key=${BACKUP_S3_SECRET_KEY},endpoint=${BACKUP_S3_ENDPOINT},region=${BACKUP_S3_REGION}:${BACKUP_S3_BUCKET}"
+BACKUP=":s3,provider=Other,access_key_id=${BACKUP_S3_ACCESS_KEY},secret_access_key=${BACKUP_S3_SECRET_KEY},endpoint='${BACKUP_S3_ENDPOINT}',region='${BACKUP_S3_REGION}':${BACKUP_S3_BUCKET}"
 
 # Encrypted DB/secrets: copy the restic repo, or use restic's native repo-to-repo copy.
 rclone sync "$BACKUP/restic" /mnt/hdd/panoramax/restic
@@ -451,8 +453,8 @@ pg_restore -h db -U gvs -d keycloak --no-owner /tmp/restore/pg/keycloak.dump
 
 **3. Restore images.** Repopulate production S3 from the backup S3 (or point the instance at the backup S3 temporarily), using the same connection-string style as §5.3/§8:
 ```bash
-BACKUP=":s3,provider=Other,access_key_id=${BACKUP_S3_ACCESS_KEY},secret_access_key=${BACKUP_S3_SECRET_KEY},endpoint=${BACKUP_S3_ENDPOINT},region=${BACKUP_S3_REGION}:${BACKUP_S3_BUCKET}/images/permanent"
-PROD=":s3,provider=Other,access_key_id=<new-prod-access-key>,secret_access_key=<new-prod-secret-key>,endpoint=<new-prod-endpoint>,region=<new-prod-region>:<new-prod-bucket>/permanent"
+BACKUP=":s3,provider=Other,access_key_id=${BACKUP_S3_ACCESS_KEY},secret_access_key=${BACKUP_S3_SECRET_KEY},endpoint='${BACKUP_S3_ENDPOINT}',region='${BACKUP_S3_REGION}':${BACKUP_S3_BUCKET}/images/permanent"
+PROD=":s3,provider=Other,access_key_id=<new-prod-access-key>,secret_access_key=<new-prod-secret-key>,endpoint='<new-prod-endpoint>',region='<new-prod-region>':<new-prod-bucket>/permanent"
 
 rclone copy "$BACKUP" "$PROD" --transfers 16 --fast-list
 ```
