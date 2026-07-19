@@ -389,7 +389,11 @@ Nothing else `depends_on` the `backup` service, so the `healthcheck:` block abov
 The nightly schedule (§7.2) doesn't need to be the only way a backup runs. `backup/backup-now.sh` runs all three jobs back-to-back, in the same order as the cron schedule (images, then db, then config — see §10 on why that order matters):
 
 ```bash
-docker compose -p geovisio-auth exec backup backup-now.sh
+# from the server - backup container name can be found in the logs menu in Coolify
+sudo docker exec <backup_container_name_or_id> backup-now.sh
+
+# using 'terminal' from the Coolify UI when connected to the backup container
+backup-now.sh
 ```
 
 Like the individual scripts, it uses `set -eu` with no error suppression, so it stops at the first failing step rather than continuing on to the next. It doesn't touch `crontab.template` or the container's cron schedule — it's purely an extra, manually-invoked entrypoint alongside the automated one. Useful before/after a risky change, or to validate the backup pipeline without waiting for 2am.
