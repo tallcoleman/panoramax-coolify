@@ -22,8 +22,10 @@ DST=":s3,provider=Other,access_key_id=${BACKUP_S3_ACCESS_KEY},secret_access_key=
 
 # 'copy' is additive: it never deletes from the backup, so originals removed in
 # production are retained. Swap to 'sync' only if you want an exact mirror.
+# -v is required for rclone to print the final transfer stats at all — at the
+# default NOTICE log level a clean run is otherwise completely silent.
 rclone copy "$SRC" "$DST" \
-  --transfers 16 --checkers 32 --fast-list --stats-one-line
+  --transfers 16 --checkers 32 --fast-list --stats-one-line -v
 
 # Success marker for the container healthcheck (§7.3).
 touch /backups/.ok-images
