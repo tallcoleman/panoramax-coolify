@@ -6,6 +6,6 @@
 set -eu
 INTERVAL="${KC_EXPORT_INTERVAL_SECONDS:-86400}"
 while true; do
-  /opt/keycloak/bin/kc.sh export --dir /export --users realm_file --realm geovisio
+  /opt/keycloak/bin/kc.sh export --optimized --dir /export --users realm_file --realm geovisio
   sleep "$INTERVAL"
 done
