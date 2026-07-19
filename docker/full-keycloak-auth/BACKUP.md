@@ -386,6 +386,16 @@ Nothing else `depends_on` the `backup` service, so the `healthcheck:` block abov
 `docker compose -p geovisio-auth exec backup restic init`. Then trigger a manual run to validate,
 e.g. `docker compose -p geovisio-auth exec backup backup-db.sh`.
 
+### 7.4 One-off backups
+
+The nightly schedule (§7.2) doesn't need to be the only way a backup runs. `backup/backup-now.sh` runs all three jobs back-to-back, in the same order as the cron schedule (images, then db, then config — see §10 on why that order matters):
+
+```bash
+docker compose -p geovisio-auth exec backup backup-now.sh
+```
+
+Like the individual scripts, it uses `set -eu` with no error suppression, so it stops at the first failing step rather than continuing on to the next. It doesn't touch `crontab.template` or the container's cron schedule — it's purely an extra, manually-invoked entrypoint alongside the automated one. Useful before/after a risky change, or to validate the backup pipeline without waiting for 2am.
+
 ---
 
 ## 8. Weekly copy to the external hard drive
