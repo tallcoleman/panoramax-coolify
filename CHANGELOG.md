@@ -96,3 +96,15 @@ SMTP variables (`SMTP_HOST`, `SMTP_FROM`, `SMTP_USER`, `SMTP_PASSWORD`) are left
 - Secrets and config backup
 - Full disaster-recovery procedure
 - Weekly copy to an external hard drive
+
+---
+
+## Backup service implemented
+
+The `backup/` sidecar described in `BACKUP.md` §5/§7 is now wired into the stack:
+
+- **New `backup/` directory** — `Dockerfile` (Alpine + restic, rclone, `postgresql16-client`, `supercronic`), `entrypoint.sh` (renders the cron schedule from env vars via `envsubst`), `crontab.template`, and the backup scripts (`backup-db.sh`, `backup-images.sh`, `backup-config.sh`, `backup-healthcheck.sh`, `restic-check.sh`).
+- **`docker-compose.yml`** — added the `backup` service (restic repository derived from `BACKUP_S3_*`, all required secrets/credentials reused rather than re-entered), a `backup_scratch` volume for working files, and a `kc_export` volume shared with `auth` so a Coolify Scheduled Task can trigger `kc.sh export` for the portable Keycloak realm snapshot.
+- **`env.example`** — documented the new `BACKUP_S3_*`, `RESTIC_PASSWORD`, `PGHOST`/`PGUSER`, `BACKUP_CRON_*`, and `RESTIC_KEEP_*` variables.
+
+Out of scope (operational, not code): the weekly HDD copy (§8), the disaster-recovery runbook (§9), and configuring the actual Coolify Scheduled Task for the Keycloak realm export.

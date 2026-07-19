@@ -74,6 +74,8 @@ services:
       interval: 5s
       retries: 5
       start_period: 60s
+    volumes:
+      - kc_export:/export
   migrations:
     <<: *geovisio-default
     command: db-upgrade
@@ -239,6 +241,50 @@ services:
       - postgres_data:/var/lib/postgresql/data/
     restart: always
 
+  # See BACKUP.md for the full backup/restore strategy: restic (Postgres,
+  # Keycloak export, secrets) + rclone (permanent pictures) driven by supercronic.
+  backup:
+    build: ./backup
+    restart: unless-stopped
+    depends_on: [db]
+    environment:
+      PG_PASSWORD: ${PG_PASSWORD:?}
+      PGHOST: ${PGHOST:-db}
+      PGUSER: ${PGUSER:-gvs}
+      OAUTH_CLIENT_SECRET: ${OAUTH_CLIENT_SECRET:?}
+      FLASK_SECRET_KEY: ${FLASK_SECRET_KEY:?}
+      KC_DB_PASSWORD: ${KC_DB_PASSWORD:?}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?}
+      FS_PERMANENT_URL: ${FS_PERMANENT_URL:?}     # reused from the api/background-worker config
+      RESTIC_PASSWORD: ${RESTIC_PASSWORD:?}
+      RESTIC_REPOSITORY: s3:${BACKUP_S3_ENDPOINT:?}/${BACKUP_S3_BUCKET:?}/restic
+      AWS_ACCESS_KEY_ID: ${BACKUP_S3_ACCESS_KEY:?}    # restic's S3 backend reads these names
+      AWS_SECRET_ACCESS_KEY: ${BACKUP_S3_SECRET_KEY:?}
+      AWS_DEFAULT_REGION: ${BACKUP_S3_REGION}
+      BACKUP_S3_ACCESS_KEY: ${BACKUP_S3_ACCESS_KEY:?} # used directly by backup-images.sh (rclone)
+      BACKUP_S3_SECRET_KEY: ${BACKUP_S3_SECRET_KEY:?}
+      BACKUP_S3_ENDPOINT: ${BACKUP_S3_ENDPOINT:?}
+      BACKUP_S3_REGION: ${BACKUP_S3_REGION}
+      BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET:?}
+      BACKUP_CRON_IMAGES: ${BACKUP_CRON_IMAGES:-0 2 * * *}
+      BACKUP_CRON_DB: ${BACKUP_CRON_DB:-30 2 * * *}
+      BACKUP_CRON_CONFIG: ${BACKUP_CRON_CONFIG:-45 2 * * *}
+      BACKUP_CRON_CHECK: ${BACKUP_CRON_CHECK:-0 4 * * 0}
+      RESTIC_KEEP_DAILY: ${RESTIC_KEEP_DAILY:-7}
+      RESTIC_KEEP_WEEKLY: ${RESTIC_KEEP_WEEKLY:-5}
+      RESTIC_KEEP_MONTHLY: ${RESTIC_KEEP_MONTHLY:-12}
+    healthcheck:
+      test: ["CMD", "backup-healthcheck.sh"]
+      interval: 1h
+      timeout: 10s
+      retries: 1
+      start_period: 26h
+    volumes:
+      - backup_scratch:/backups
+      - kc_export:/backups/keycloak:ro          # from §5.4, if used
+
 volumes:
   postgres_data:
     name: geovisio_auth_postgres_data
+  backup_scratch:
+  kc_export:

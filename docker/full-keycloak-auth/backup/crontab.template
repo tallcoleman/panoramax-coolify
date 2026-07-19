@@ -1,0 +1,5 @@
+# min hour dom mon dow  command
+${BACKUP_CRON_IMAGES}   backup-images.sh     # new HD pictures, production S3 -> backup S3
+${BACKUP_CRON_DB}       backup-db.sh         # geovisio + keycloak + roles -> backup S3 (encrypted)
+${BACKUP_CRON_CONFIG}   backup-config.sh     # secrets -> backup S3 (encrypted)
+${BACKUP_CRON_CHECK}    restic-check.sh      # integrity check (optional)
