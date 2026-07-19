@@ -88,8 +88,14 @@ services:
     exclude_from_hc: true
     labels:
       - "traefik.enable=false"
+    # Waits on auth (not just db) so it never races auth's Liquibase migration
+    # against a fresh/empty keycloak schema — both containers migrate on boot,
+    # and running them concurrently against an empty schema fails with
+    # "relation databasechangelog already exists" as they race to create it.
     depends_on:
       db:
+        condition: service_healthy
+      auth:
         condition: service_healthy
     environment:
       # Only the DB connection is needed — no HTTP/proxy/SMTP config, since the
