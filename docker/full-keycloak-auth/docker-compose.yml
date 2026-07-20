@@ -45,6 +45,17 @@ services:
       KC_DB_PASSWORD: ${KC_DB_PASSWORD:?}
       KC_DB_SCHEMA: keycloak
       KC_DB_URL: jdbc:postgresql://db/geovisio
+
+      # SMTP is optional — see the SMTP_FROM comment on auth below for why
+      # it needs a fallback rather than being left unset.
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_FROM: ${SMTP_FROM:-noreply@example.invalid}
+      SMTP_FROM_DISPLAY_NAME: ${SMTP_FROM_DISPLAY_NAME:-Panoramax}
+      SMTP_SSL: ${SMTP_SSL:-false}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASSWORD: ${SMTP_PASSWORD}
     depends_on:
       db:
         condition: service_healthy
@@ -75,10 +86,16 @@ services:
       # Enable health endpoint on management port (9000) at /health/ready
       KC_HTTP_MANAGEMENT_HEALTH_ENABLED: "true"
 
-      # SMTP for email verification
+      # SMTP for email verification. Optional — everything else here already
+      # defaults, but SMTP_FROM needs an explicit fallback since Keycloak's
+      # realm import validates it as a real email address and hard-fails
+      # (aborting import) on an empty string. The .invalid TLD (RFC 2606) is
+      # reserved for exactly this: obviously fake, syntactically valid.
+      # Actual email sending (password reset, verification) won't work
+      # until real SMTP_* values are set, but nothing blocks on that anymore.
       SMTP_HOST: ${SMTP_HOST}
       SMTP_PORT: ${SMTP_PORT:-587}
-      SMTP_FROM: ${SMTP_FROM}
+      SMTP_FROM: ${SMTP_FROM:-noreply@example.invalid}
       SMTP_FROM_DISPLAY_NAME: ${SMTP_FROM_DISPLAY_NAME:-Panoramax}
       SMTP_SSL: ${SMTP_SSL:-false}
       SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
