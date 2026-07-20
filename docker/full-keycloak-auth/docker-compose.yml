@@ -34,7 +34,7 @@ services:
   # entirely; `auth` then starts normally with the realm already present.
   keycloak-import:
     <<: *keycloak-build
-    command: import --optimized --dir /opt/keycloak/data/import --override false
+    command: import --optimized --file /opt/keycloak/data/import/geovisio_realm.json --override false
     restart: "no"
     exclude_from_hc: true
     environment:
