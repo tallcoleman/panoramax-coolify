@@ -4,7 +4,7 @@ OUT=/backups/pg
 rm -rf "$OUT"; mkdir -p "$OUT"
 
 export PGPASSWORD="${PG_PASSWORD}"
-H="${PGHOST:-db}"; U="${PGUSER:-gvs}"
+H=db; U=gvs
 
 # 1) Global objects: roles incl. passwords (gvs is the cluster superuser here)
 pg_dumpall -h "$H" -U "$U" --globals-only > "$OUT/globals.sql"

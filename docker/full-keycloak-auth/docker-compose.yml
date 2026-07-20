@@ -320,8 +320,10 @@ services:
     depends_on: [db]
     environment:
       PG_PASSWORD: ${PG_PASSWORD:?}
-      PGHOST: ${PGHOST:-db}
-      PGUSER: ${PGUSER:-gvs}
+      # Hardcoded, not Coolify-settable: Coolify injects app-level env vars
+      # into ALL services, so a PGHOST set here previously broke db's own init script.
+      PGHOST: db
+      PGUSER: gvs
       OAUTH_CLIENT_SECRET: ${OAUTH_CLIENT_SECRET:?}
       FLASK_SECRET_KEY: ${FLASK_SECRET_KEY:?}
       KC_DB_PASSWORD: ${KC_DB_PASSWORD:?}
