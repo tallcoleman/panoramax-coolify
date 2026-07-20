@@ -1388,17 +1388,7 @@
         "xXSSProtection": "1; mode=block",
         "strictTransportSecurity": "max-age=31536000; includeSubDomains"
     },
-    "smtpServer": {
-        "host": "${SMTP_HOST}",
-        "port": "${SMTP_PORT}",
-        "from": "${SMTP_FROM}",
-        "fromDisplayName": "${SMTP_FROM_DISPLAY_NAME}",
-        "ssl": "${SMTP_SSL}",
-        "starttls": "${SMTP_STARTTLS}",
-        "auth": "true",
-        "user": "${SMTP_USER}",
-        "password": "${SMTP_PASSWORD}"
-    },
+    "smtpServer": {},
     "eventsEnabled": false,
     "eventsListeners": [
         "jboss-logging"
