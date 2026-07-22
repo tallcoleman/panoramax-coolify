@@ -1,6 +1,7 @@
 #!/bin/sh
 # Periodically runs `kc.sh export` so a portable realm+users snapshot lands on
-# the kc_export volume for the backup service to restic (BACKUP.md §5.4).
+# the kc_export volume for the backup service to restic (see backup/backup_architecture.md,
+# "The keycloak-export sidecar").
 # kc.sh export reads directly from Postgres, not the live HTTP server, so this
 # runs as its own sleep-loop entrypoint rather than inside the running `auth` process.
 set -u

@@ -2,7 +2,8 @@
 # Bulk-apply a public-read ACL to every object under one or more S3 prefixes.
 #
 # Needed on S3-compatible providers that don't support bucket policies (e.g. OVH
-# returns "NotImplemented" for put-bucket-policy — see BACKUP.md §9 Step A). A
+# returns "NotImplemented" for put-bucket-policy — see deployment_instructions.md,
+# "CORS and public access on the Production Public bucket"). A
 # bucket-level ACL only grants anonymous *list* rights; it does not make
 # individual objects readable, and neither `rclone copy`/`move` nor the
 # picture-worker's own S3 writes set an object ACL. Run this after any image

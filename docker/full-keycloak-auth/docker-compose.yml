@@ -83,7 +83,8 @@ services:
       # real email address, which previously hard-failed import whenever
       # SMTP wasn't configured. A real disaster-recovery restore brings back
       # whatever SMTP config production actually had via the DB restore
-      # (§9 of BACKUP.md) — this only affects a from-scratch first deploy.
+      # (see backup_and_restore_instructions.md) — this only affects a
+      # from-scratch first deploy.
 
       # tell keycloak that it will be /oauth prefix by nginx
       KC_HOSTNAME_PATH: /oauth
@@ -112,8 +113,9 @@ services:
       start_period: 60s
 
   # Periodically runs `kc.sh export` against the same DB, without needing the
-  # live HTTP server — see BACKUP.md §5.4. Its output on kc_export is picked up
-  # by backup-config.sh (§5.5) alongside the secrets it already ships.
+  # live HTTP server — see backup/backup_architecture.md. Its output on
+  # kc_export is picked up by backup-config.sh alongside the secrets it
+  # already ships.
   keycloak-export:
     <<: *keycloak-build
     entrypoint: ["/usr/local/bin/keycloak-export-loop.sh"]
@@ -311,7 +313,7 @@ services:
       - postgres_data:/var/lib/postgresql/data/
     restart: always
 
-  # See BACKUP.md for the full backup/restore strategy: restic (Postgres,
+  # See backup/backup_architecture.md for how this works: restic (Postgres,
   # Keycloak export, secrets) + rclone (permanent pictures) driven by supercronic.
   backup:
     build: ./backup
@@ -354,7 +356,7 @@ services:
       start_period: 26h
     volumes:
       - backup_scratch:/backups
-      - kc_export:/backups/keycloak:ro          # populated by keycloak-export, see §5.4
+      - kc_export:/backups/keycloak:ro          # populated by keycloak-export
 
 volumes:
   postgres_data:
