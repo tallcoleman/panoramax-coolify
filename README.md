@@ -9,30 +9,20 @@ The deployment runs:
 - **nginx** reverse proxy routing `/api`, `/oauth`, and `/` to the correct services
 - **Panoramax website** frontend
 - **Background workers** for image processing (blur + derivate generation)
+- **Backup sidecar** shipping encrypted database/secrets snapshots and picture copies to S3
 
 See `CHANGELOG.md` for a summary of changes made relative to the upstream example.
 
 ---
 
-## Prerequisites
+## Documentation
 
-- A domain with TLS termination handled upstream (Coolify/Traefik does this)
-- An S3-compatible object store for pictures (e.g. OVH Cloud Object Storage)
-- An SMTP server for Keycloak email verification
-
----
-
-## Deployment
-
-Follow the [instructions for a Coolify docker compose deployment](https://coolify.io/docs/applications/build-packs/docker-compose).
-
-Configuration notes:
-
-1. Use `docker/full-keycloak-auth/env.example` to help you set the appropriate environment variables in the Environment Variables menu.
-2. Point Coolify at this repository, set the compose file path to `docker/full-keycloak-auth/docker-compose.yml`.
-3. Deploy. Coolify/Traefik handles TLS; nginx routes internally on port 80.
-
-On first deploy Keycloak will import the realm automatically. The `migrations` service runs database migrations before the API starts and exits cleanly (Coolify will not restart it).
+| Document | What it covers |
+| --- | --- |
+| [`deployment_instructions.md`](./deployment_instructions.md) | Deploying a new instance to Coolify, including S3 bucket setup. |
+| [`configuration_options.md`](./configuration_options.md) | Every environment variable — required vs optional, and what each does. |
+| [`backup_and_restore_instructions.md`](./backup_and_restore_instructions.md) | Running one-off backups, verifying automatic backups, and the full restore runbook. |
+| [`docker/full-keycloak-auth/backup/backup_architecture.md`](./docker/full-keycloak-auth/backup/backup_architecture.md) | How the backup code works — for reading and modifying it, not for operating it. |
 
 ---
 
