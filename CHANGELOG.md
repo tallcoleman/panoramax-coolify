@@ -63,7 +63,6 @@ Migrated from local filesystem storage to S3-compatible object storage:
 
 - **Self-registration disabled** — `registrationAllowed: false` in the realm config; accounts must be created by an admin.
 - **Email verification required** — `verifyEmail: true` added to the realm config.
-- **SMTP configuration** — added `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_SSL`, and `SMTP_STARTTLS` environment variables wired into the Keycloak realm SMTP settings.
 - **`API_REGISTRATION_IS_OPEN`** — added to `docker-compose.yml` and `env.example` (defaults to `False`) to surface the registration policy in the website UI and federation metadata.
 
 ---
@@ -121,3 +120,47 @@ Out of scope (operational, not code): the weekly HDD copy (§8) and the disaster
 - **`backup/backup-config.sh`** — the restic `config` backup now also includes `/backups/keycloak` (the read-only `kc_export` mount), so the realm snapshot ships in the same nightly run as the secrets it already backs up.
 
 A dedicated Keycloak-based sidecar was necessary rather than folding this into the existing Alpine `backup` container: `kc.sh export` requires the full Keycloak/Quarkus JVM runtime built for glibc, which can't be cleanly embedded in the musl-based Alpine image without re-basing it entirely.
+
+---
+
+## Backup sidecar crash-loop fixes
+
+The `backup` and `keycloak-export` sidecars both crash-looped in practice after initial rollout; each was root-caused and fixed independently:
+
+- **supercronic `-no-reap`** — supercronic's zombie-reaping only activates when it detects it's running as PID 1, and that reaping logic crashed immediately on startup (before any cron job ran), restarting the `backup` container in a tight loop. Runs with `-no-reap` now and lets Docker's own init (tini) handle reaping.
+- **`kc.sh export --optimized`** — plain `kc.sh export` re-augments the Quarkus build config at runtime, and since `KC_DB=postgres` is a build-time property not mirrored as a runtime env var on `keycloak-export`, re-augmentation silently dropped the Postgres JDBC driver config and broke every export. `--optimized` reuses the build already baked into the image, matching how `auth` itself runs `start --optimized`.
+- **Auto-initialize the restic repo** — fresh deploys crash-looped every backup/check job overnight because the restic S3 repo was never initialized. `entrypoint.sh` now detects an uninitialized repo and runs `restic init` automatically instead of requiring a manual first-run step.
+- **rclone connection strings quoted** — rclone's inline connection-string syntax uses `:` as the remote/path separator, so an unquoted `endpoint=https://host` value was misparsed into an "unsupported protocol scheme" error. `endpoint`/`region` are now single-quoted in `backup-images.sh` and the matching `BACKUP.md` examples.
+- **`backup-images.sh` logs transfer stats** — rclone's default log level (NOTICE) suppresses the final "Transferred:" summary, so a clean nightly run produced no output at all. Added `-v` so the stats line always prints, making it possible to confirm from logs alone that a sync did something.
+
+---
+
+## Keycloak realm import stability
+
+`auth`'s `start --optimized --import-realm` was re-importing the realm file on every boot instead of once, and `keycloak-export` intermittently raced it during startup. Root-caused and fixed as a sequence:
+
+- **One-shot `keycloak-import` service** — `--import-realm` triggers Keycloak's own internal restart after import completes, but that self-restart was happening before the import's DB write committed, so every subsequent boot still found no realm, re-imported, and restarted again — an infinite loop (`auth` cycling every ~15-25s, `keycloak-export` perpetually failing with "realm not found by realm name 'geovisio'"). A new `keycloak-import` service (`restart: "no"`) now runs `kc.sh import` once against the DB before `auth` or `keycloak-export` start; `auth` starts with plain `start --optimized` (no import flag), and both `auth` and `keycloak-export` gate on `keycloak-import`'s `service_completed_successfully`.
+- **`keycloak-import` points `--file` at the realm file directly** — `--dir /opt/keycloak/data/import` only logged a directory scan and never actually imported `geovisio_realm.json` (no `SingleFileImportProvider` log line). Master realm bootstrap succeeded regardless, masking the failure until `keycloak-export` surfaced it. Pointing `--file` directly at `geovisio_realm.json` is unambiguous.
+- **`keycloak-export` retries with backoff instead of exiting** — with no ordering dependency on `auth`, `keycloak-export` could run before the realm was imported and fail with "realm not found." Under `set -eu` that exited the script and restarted the whole container on `restart: unless-stopped`, triggering a full JVM boot on every retry with no backoff — a second Keycloak JVM competing for CPU/DB alongside `auth` and likely contributing to `auth`'s own startup instability. The export loop now retries in place every 30s until it succeeds, without restarting the container.
+- **`keycloak-export` serialized after `auth`'s healthcheck, then that dependency reverted** — both `auth` and `keycloak-export` run Keycloak's Liquibase migration on boot; on a fresh schema they raced to create the changelog table, crashing `keycloak-export` with "relation databasechangelog already exists." Adding `depends_on: auth: condition: service_healthy` fixed the race but turned `auth`'s already-flaky healthcheck into a hard deploy blocker, which Coolify then retried as a full redeploy loop — so the hard dependency was reverted once `keycloak-export`'s own retry-with-backoff loop (above) made the race self-healing without needing compose-level ordering.
+- **`auth` healthcheck downgraded to a bare TCP-connect check** — the previous check sent a real GET to `/oauth/realms/master` requiring a 200, which only succeeds once realm import fully finishes. On Coolify, something restarts unhealthy containers on a shorter timeout than compose's own `start_period` (observed ~23-29s restarts vs. a configured 60s `start_period` + 5x5s retries), so `auth` never got far enough into startup to pass before being killed and restarted, looping indefinitely. The healthcheck is now a bare TCP-connect (liveness, not readiness) — dependents may see a few seconds of 503s from `auth` right after it's marked healthy.
+- **`PGHOST`/`PGUSER` hardcoded** — both always matched the `db` service's own name/user, so making them Coolify-configurable had no real use case and was a footgun: Coolify's Docker Compose buildpack injects every app-level env var into all services, and a `PGHOST` meant only for `backup` previously broke `db`'s own local init script when set. Removed from `env.example`; hardcoded in `docker-compose.yml` and `backup-db.sh`.
+
+---
+
+## Backup operator tooling
+
+- **`backup/backup-now.sh`** — combines the images/db/config scripts into a single manually-invoked entrypoint for one-off backup runs, layered on top of the existing daily cron schedule.
+- **`backup/fix-object-acls.sh`** — some S3-compatible providers (e.g. OVH) don't support bucket policies, so making objects publicly readable after a restore requires setting `public-read` ACL per-object. Parallelizes the calls and reports progress.
+
+---
+
+## S3 public-read ACLs for public paths
+
+Added `public-read` ACL to the public S3 paths in `env.example` so the website can load pictures directly from S3 (via `S3_PERMANENT_PUBLIC_URL`/`S3_DERIVATES_PUBLIC_URL`) without a bucket policy — needed on providers that don't support them (see `fix-object-acls.sh` above for backfilling existing objects).
+
+---
+
+## `BACKUP.md` §9 restore procedure corrected
+
+The restore runbook's "bring up Postgres only, then `CREATE DATABASE`" steps didn't reflect how this stack actually starts: the `migrations` and `auth` (`--import-realm`, later `keycloak-import`) services auto-create empty `geovisio`/`keycloak` schemas on a fresh deploy, so a restore lands on top of a pre-existing empty schema rather than a blank database. Rewritten so `pg_restore` uses `--clean --if-exists` to overwrite that pre-existing schema, clarifies which commands run in the `backup` container vs. any machine, and states that the derivates warm-up is mandatory (not optional) for this deployment's `PREPROCESS` + direct-S3-serving configuration.
