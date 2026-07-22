@@ -18,7 +18,7 @@ Note that `PGHOST` and `PGUSER` are **not Coolify-settable at all** — they are
 
 | Variable | Required | Description |
 | --- | --- | --- |
-| `INSTANCE_NAME` | Optional | The name of your instance which will appear in the top left of the website. Defaults differ per service if left unset: the API falls back to `A Panoramax instance`, the website to `A geovisio instance`. Set it explicitly to avoid the mismatch. |
+| `INSTANCE_NAME` | Optional (default `A Panoramax instance`) | The name of your instance which will appear in the top left of the website. |
 | `DOMAIN` | **Required** | URL of your own domain (without a scheme or a path, just the domain). Must match the domain you set for the `reverseproxy` service in Coolify. |
 
 ## Secrets

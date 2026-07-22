@@ -83,6 +83,7 @@ SMTP variables (`SMTP_HOST`, `SMTP_FROM`, `SMTP_USER`, `SMTP_PASSWORD`) are left
 - **`INFRA_NB_PROXIES=2`** set explicitly — with both Traefik (Coolify) and nginx in the request path before the API, two proxy hops must be declared so Flask trusts the correct `X-Forwarded-For` header for URL generation and rate limiting.
 - **`KC_DB_PASSWORD`** parameterised — replaced a hardcoded password in `1-init-keycloak-db.sh` and `docker-compose.yml` with the `KC_DB_PASSWORD` environment variable.
 - **`VITE_TITLE`, `VITE_META_TITLE`, `VITE_META_DESCRIPTION`** — made configurable via environment variables with sensible defaults, instead of being hardcoded in the compose file.
+- **`INSTANCE_NAME` defaults aligned** — the website's `VITE_INSTANCE_NAME` fell back to `A geovisio instance` while the API's `API_SUMMARY` fell back to `A Panoramax instance`. An operator who left the variable unset got a different name in the site header than in the API summary and federation metadata. Both now default to `A Panoramax instance`.
 
 ---
 

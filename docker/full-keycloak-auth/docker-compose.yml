@@ -225,7 +225,7 @@ services:
       start_period: 10s
     environment:
       # documentation for configuration: https://docs.panoramax.fr/website/03_Settings/
-      VITE_INSTANCE_NAME: ${INSTANCE_NAME:-A geovisio instance}
+      VITE_INSTANCE_NAME: ${INSTANCE_NAME:-A Panoramax instance}
       VITE_API_URL: /
       VITE_TILES: https://panoramax.openstreetmap.fr/pmtiles/basic.json
       # optional metadata
