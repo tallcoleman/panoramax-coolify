@@ -80,6 +80,8 @@ The schedule is a **template rendered at container start**, not baked into the i
 
 This fails closed by design: if a schedule expression is malformed, supercronic errors parsing `/etc/crontab` at startup and the container crash-loops under `restart: unless-stopped` — loud and visible in Coolify's logs, rather than a schedule silently not running.
 
+supercronic is started with `-no-reap`, and the compose service sets `init: true` so tini runs as PID 1 and reaps zombie processes instead. Without one or the other, exited job processes would accumulate.
+
 `entrypoint.sh` also initialises the restic repository on first start. It runs `restic snapshots` to detect an existing repo and falls back to `restic init` if that fails, which avoids erroring out on `init` when the repo already exists. No manual bootstrap step is needed on a new deployment.
 
 ## Healthcheck design

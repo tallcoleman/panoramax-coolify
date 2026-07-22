@@ -10,7 +10,7 @@ If you are restoring an existing instance from a backup rather than starting fre
 
 - A domain with TLS termination handled upstream (Coolify/Traefik does this)
 - An S3-compatible object store for pictures (e.g. OVH Cloud Object Storage, Backblaze B2)
-- An SMTP server for Keycloak email verification
+- Optionally, an SMTP server. It is not needed to deploy, and is not configured by environment variables — the realm imports with no email settings and Keycloak sends no verification or password-reset emails until an admin sets SMTP up manually in the Keycloak console (see step 6).
 
 ---
 

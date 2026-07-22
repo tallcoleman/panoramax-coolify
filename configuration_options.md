@@ -18,7 +18,7 @@ Note that `PGHOST` and `PGUSER` are **not Coolify-settable at all** — they are
 
 | Variable | Required | Description |
 | --- | --- | --- |
-| `INSTANCE_NAME` | Optional (default `A Panoramax instance`) | The name of your instance which will appear in the top left of the website. |
+| `INSTANCE_NAME` | Optional | The name of your instance which will appear in the top left of the website. Defaults differ per service if left unset: the API falls back to `A Panoramax instance`, the website to `A geovisio instance`. Set it explicitly to avoid the mismatch. |
 | `DOMAIN` | **Required** | URL of your own domain (without a scheme or a path, just the domain). Must match the domain you set for the `reverseproxy` service in Coolify. |
 
 ## Secrets
@@ -75,6 +75,19 @@ These carry no credentials — they are used by clients to fetch images directly
 | `INFRA_NB_PROXIES` | Optional (default `2`) | Number of proxies in front of GeoVisio. The default of 2 accounts for Traefik (Coolify) plus nginx, both of which set `X-Forwarded-For`. This parameter is used so that geovisio can trust the `X-Forwarded-` headers for URL generation (more details in the [Flask documentation](https://flask.palletsprojects.com/en/2.2.x/deploying/proxy_fix/)). |
 | `API_REGISTRATION_IS_OPEN` | Optional (default `False`) | Whether the instance is open to self-registration (shown in the website UI and federation metadata). Leave as `False` if account creation is admin-only. |
 | `BLUR_API` | Optional (default `https://blur.panoramax.openstreetmap.fr`) | Change this if you have your own blur API instance. |
+
+## Website
+
+| Variable | Required | Description |
+| --- | --- | --- |
+| `WEBSITE_IMAGE_TAG` | Optional (default `latest`) | Tag of the `panoramax/website` image to deploy. Pin to a specific version to control when you upgrade. |
+| `VITE_TITLE` | Optional | The title for the `<title>` tag of the HTML. Defaults to `My Panoramax: The free alternative to photo-mapping territories`. |
+| `VITE_META_TITLE` | Optional | The title used in meta tags. Same default as `VITE_TITLE`. |
+| `VITE_META_DESCRIPTION` | Optional | The description for meta tags, which is useful for SEO. Defaults to a generic description of Panoramax. |
+
+Further website settings are documented in the [Panoramax website settings docs](https://docs.panoramax.fr/website/03_Settings/); only the variables above are wired up to Coolify in this deployment.
+
+---
 
 **Number of picture workers:** not an environment variable — add or remove `background-worker-N` services in `docker-compose.yml` to adjust the count.
 
