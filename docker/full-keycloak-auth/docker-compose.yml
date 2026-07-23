@@ -9,9 +9,11 @@
 #
 # Note: if the port 8080 is alreay binded on your system, change it in this file
 #
-# The ${SERVICE_PASSWORD_64_*} references below are Coolify "magic" environment
-# variables, auto-generated the first time the compose file is loaded. See configuration_options.md (Secrets)
-# and backup_and_restore_instructions.md for how they work and the restore caveat.
+# The secret values below are supplied by Coolify "magic" environment variables,
+# auto-generated the first time the compose file is loaded. See configuration_options.md
+# (Secrets) and backup_and_restore_instructions.md for how they work and the restore
+# caveat. (The magic-variable token is intentionally not spelled out here: Coolify's
+# scanner reads comment text too, and a placeholder form of it would be mis-parsed.)
 
 x-base-geovisio: &geovisio-default
   image: panoramax/api:${GEOVISIO_IMAGE_TAG:-latest}
