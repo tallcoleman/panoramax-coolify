@@ -18,9 +18,8 @@
 x-base-geovisio: &geovisio-default
   image: panoramax/api:${GEOVISIO_IMAGE_TAG:-latest}
 
-x-base-geovisio-env:
-  &geovisio-default-env # Override the FS_URL default baked into the pre-built image; the split S3 variables are used instead
-  FS_URL: ""
+x-base-geovisio-env: &geovisio-default-env
+  FS_URL: "" # Override the FS_URL default baked into the pre-built image; the split S3 variables are used instead
 
 x-base-keycloak: &keycloak-build
   build:
