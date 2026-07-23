@@ -8,12 +8,16 @@
 # and served on a domain defined in the `.env` file as DOMAIN
 #
 # Note: if the port 8080 is alreay binded on your system, change it in this file
+#
+# The ${SERVICE_PASSWORD_64_*} references below are Coolify "magic" environment
+# variables, auto-generated the first time the compose file is loaded. See configuration_options.md (Secrets)
+# and backup_and_restore_instructions.md for how they work and the restore caveat.
 
 x-base-geovisio: &geovisio-default
   image: panoramax/api:${GEOVISIO_IMAGE_TAG:-latest}
 
-x-base-geovisio-env: &geovisio-default-env
-  # Override the FS_URL default baked into the pre-built image; the split S3 variables are used instead
+x-base-geovisio-env:
+  &geovisio-default-env # Override the FS_URL default baked into the pre-built image; the split S3 variables are used instead
   FS_URL: ""
 
 x-base-keycloak: &keycloak-build
@@ -40,9 +44,9 @@ services:
     environment:
       # Placeholders in keycloak-realm.json
       GEOVISIO_BASE_URL: https://${DOMAIN:?}
-      GEOVISIO_CLIENT_SECRET: ${OAUTH_CLIENT_SECRET:?}
+      GEOVISIO_CLIENT_SECRET: ${SERVICE_PASSWORD_64_OAUTH_CLIENT_SECRET}
       KC_DB_USERNAME: keycloak_user
-      KC_DB_PASSWORD: ${KC_DB_PASSWORD:?}
+      KC_DB_PASSWORD: ${SERVICE_PASSWORD_64_KC_DB_PASSWORD}
       KC_DB_SCHEMA: keycloak
       KC_DB_URL: jdbc:postgresql://db/geovisio
     depends_on:
@@ -57,12 +61,12 @@ services:
     environment:
       # Keycloak admin account
       KC_BOOTSTRAP_KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:-admin}
-      KC_BOOTSTRAP_KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?}
+      KC_BOOTSTRAP_KEYCLOAK_ADMIN_PASSWORD: ${SERVICE_PASSWORD_64_KEYCLOAK_ADMIN_PASSWORD}
 
       # Database connection
       # note: keycloak uses the same database as geovisio, in a separate schema, this way there is only 1 database to backup
       KC_DB_USERNAME: keycloak_user
-      KC_DB_PASSWORD: ${KC_DB_PASSWORD:?}
+      KC_DB_PASSWORD: ${SERVICE_PASSWORD_64_KC_DB_PASSWORD}
       KC_DB_SCHEMA: keycloak
       KC_DB_URL: jdbc:postgresql://db/geovisio
 
@@ -137,7 +141,7 @@ services:
       # Only the DB connection is needed — no HTTP/proxy/SMTP config, since the
       # live server isn't involved.
       KC_DB_USERNAME: keycloak_user
-      KC_DB_PASSWORD: ${KC_DB_PASSWORD:?}
+      KC_DB_PASSWORD: ${SERVICE_PASSWORD_64_KC_DB_PASSWORD}
       KC_DB_SCHEMA: keycloak
       KC_DB_URL: jdbc:postgresql://db/geovisio
       KC_EXPORT_INTERVAL_SECONDS: ${KC_EXPORT_INTERVAL_SECONDS:-86400}
@@ -155,7 +159,7 @@ services:
     exclude_from_hc: true
     environment:
       <<: *geovisio-default-env
-      DB_URL: postgres://gvs:${PG_PASSWORD:?}@db/geovisio
+      DB_URL: postgres://gvs:${SERVICE_PASSWORD_64_PG_PASSWORD}@db/geovisio
     depends_on:
       db:
         condition: service_healthy
@@ -174,10 +178,10 @@ services:
       <<: *geovisio-default-env
       OAUTH_PROVIDER: oidc
       OAUTH_CLIENT_ID: geovisio
-      OAUTH_CLIENT_SECRET: ${OAUTH_CLIENT_SECRET:?}
+      OAUTH_CLIENT_SECRET: ${SERVICE_PASSWORD_64_OAUTH_CLIENT_SECRET}
       OAUTH_OIDC_URL: https://${DOMAIN:?}/oauth/realms/geovisio
-      DB_URL: postgres://gvs:${PG_PASSWORD:?}@db/geovisio
-      FLASK_SECRET_KEY: ${FLASK_SECRET_KEY:?}
+      DB_URL: postgres://gvs:${SERVICE_PASSWORD_64_PG_PASSWORD}@db/geovisio
+      FLASK_SECRET_KEY: ${SERVICE_PASSWORD_64_FLASK_SECRET_KEY}
       FLASK_SESSION_COOKIE_DOMAIN: ${DOMAIN:-localhost}
       API_FORCE_AUTH_ON_UPLOAD: True
       API_PICTURES_LICENSE_SPDX_ID: CC-BY-SA-4.0 # default pictures's license, change it if needed
@@ -258,7 +262,7 @@ services:
     environment:
       <<: *geovisio-default-env
       PICTURE_PROCESS_DERIVATES_STRATEGY: PREPROCESS
-      DB_URL: postgres://gvs:${PG_PASSWORD:?}@db/geovisio
+      DB_URL: postgres://gvs:${SERVICE_PASSWORD_64_PG_PASSWORD}@db/geovisio
       FS_TMP_URL: ${FS_TMP_URL:?}
       FS_PERMANENT_URL: ${FS_PERMANENT_URL:?}
       FS_DERIVATES_URL: ${FS_DERIVATES_URL:?}
@@ -295,9 +299,9 @@ services:
   db:
     environment:
       POSTGRES_DB: geovisio
-      POSTGRES_PASSWORD: ${PG_PASSWORD:?}
+      POSTGRES_PASSWORD: ${SERVICE_PASSWORD_64_PG_PASSWORD}
       POSTGRES_USER: gvs
-      KC_DB_PASSWORD: ${KC_DB_PASSWORD:?}
+      KC_DB_PASSWORD: ${SERVICE_PASSWORD_64_KC_DB_PASSWORD}
     healthcheck:
       test: pg_isready -h db -q -d $$POSTGRES_DB -U $$POSTGRES_USER
       timeout: 5s
@@ -318,22 +322,22 @@ services:
   backup:
     build: ./backup
     restart: unless-stopped
-    init: true          # tini as PID 1; supercronic runs with -no-reap (see entrypoint.sh)
+    init: true # tini as PID 1; supercronic runs with -no-reap (see entrypoint.sh)
     depends_on: [db]
     environment:
-      PG_PASSWORD: ${PG_PASSWORD:?}
+      PG_PASSWORD: ${SERVICE_PASSWORD_64_PG_PASSWORD}
       # Hardcoded, not Coolify-settable: Coolify injects app-level env vars
       # into ALL services, so a PGHOST set here previously broke db's own init script.
       PGHOST: db
       PGUSER: gvs
-      OAUTH_CLIENT_SECRET: ${OAUTH_CLIENT_SECRET:?}
-      FLASK_SECRET_KEY: ${FLASK_SECRET_KEY:?}
-      KC_DB_PASSWORD: ${KC_DB_PASSWORD:?}
-      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?}
-      FS_PERMANENT_URL: ${FS_PERMANENT_URL:?}     # reused from the api/background-worker config
+      OAUTH_CLIENT_SECRET: ${SERVICE_PASSWORD_64_OAUTH_CLIENT_SECRET}
+      FLASK_SECRET_KEY: ${SERVICE_PASSWORD_64_FLASK_SECRET_KEY}
+      KC_DB_PASSWORD: ${SERVICE_PASSWORD_64_KC_DB_PASSWORD}
+      KEYCLOAK_ADMIN_PASSWORD: ${SERVICE_PASSWORD_64_KEYCLOAK_ADMIN_PASSWORD}
+      FS_PERMANENT_URL: ${FS_PERMANENT_URL:?} # reused from the api/background-worker config
       RESTIC_PASSWORD: ${RESTIC_PASSWORD:?}
       RESTIC_REPOSITORY: s3:${BACKUP_S3_ENDPOINT:?}/${BACKUP_S3_BUCKET:?}/restic
-      AWS_ACCESS_KEY_ID: ${BACKUP_S3_ACCESS_KEY:?}    # restic's S3 backend reads these names
+      AWS_ACCESS_KEY_ID: ${BACKUP_S3_ACCESS_KEY:?} # restic's S3 backend reads these names
       AWS_SECRET_ACCESS_KEY: ${BACKUP_S3_SECRET_KEY:?}
       AWS_DEFAULT_REGION: ${BACKUP_S3_REGION}
       BACKUP_S3_ACCESS_KEY: ${BACKUP_S3_ACCESS_KEY:?} # used directly by backup-images.sh (rclone)
@@ -356,7 +360,7 @@ services:
       start_period: 26h
     volumes:
       - backup_scratch:/backups
-      - kc_export:/backups/keycloak:ro          # populated by keycloak-export
+      - kc_export:/backups/keycloak:ro # populated by keycloak-export
 
 volumes:
   postgres_data:

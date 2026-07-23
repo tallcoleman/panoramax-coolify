@@ -71,7 +71,7 @@ Migrated from local filesystem storage to S3-compatible object storage:
 
 Variables that have no default and will cause a broken or cryptic deployment if unset are marked with `:?` in `docker-compose.yml`. Docker Compose (and Coolify) will refuse to start and report a clear error listing any missing variables, rather than silently passing empty strings into containers.
 
-Required variables: `DOMAIN`, `OAUTH_CLIENT_SECRET`, `KEYCLOAK_ADMIN_PASSWORD`, `KC_DB_PASSWORD`, `PG_PASSWORD`, `FLASK_SECRET_KEY`, `FS_TMP_URL`, `FS_PERMANENT_URL`, `FS_DERIVATES_URL`, `S3_PERMANENT_PUBLIC_URL`, `S3_DERIVATES_PUBLIC_URL`.
+Required variables: `DOMAIN`, `FS_TMP_URL`, `FS_PERMANENT_URL`, `FS_DERIVATES_URL`, `S3_PERMANENT_PUBLIC_URL`, `S3_DERIVATES_PUBLIC_URL` (plus `RESTIC_PASSWORD` and the `BACKUP_S3_*` credentials — see [Backup service implemented](#backup-service-implemented)). The application secrets (`OAUTH_CLIENT_SECRET`, `KEYCLOAK_ADMIN_PASSWORD`, `KC_DB_PASSWORD`, `PG_PASSWORD`, `FLASK_SECRET_KEY`) were subsequently moved to auto-generated Magic Environment Variables — see [Secrets auto-generated via Magic Environment Variables](#secrets-auto-generated-via-magic-environment-variables) — so they are no longer bare `:?` variables.
 
 SMTP variables (`SMTP_HOST`, `SMTP_FROM`, `SMTP_USER`, `SMTP_PASSWORD`) are left as optional bare variables — Keycloak starts without them, email just won't work until configured.
 
@@ -165,3 +165,13 @@ Added `public-read` ACL to the public S3 paths in `env.example` so the website c
 ## `BACKUP.md` §9 restore procedure corrected
 
 The restore runbook's "bring up Postgres only, then `CREATE DATABASE`" steps didn't reflect how this stack actually starts: the `migrations` and `auth` (`--import-realm`, later `keycloak-import`) services auto-create empty `geovisio`/`keycloak` schemas on a fresh deploy, so a restore lands on top of a pre-existing empty schema rather than a blank database. Rewritten so `pg_restore` uses `--clean --if-exists` to overwrite that pre-existing schema, clarifies which commands run in the `backup` container vs. any machine, and states that the derivates warm-up is mandatory (not optional) for this deployment's `PREPROCESS` + direct-S3-serving configuration.
+
+---
+
+## Secrets auto-generated via Magic Environment Variables
+
+The five application secrets (`OAUTH_CLIENT_SECRET`, `FLASK_SECRET_KEY`, `PG_PASSWORD`, `KC_DB_PASSWORD`, `KEYCLOAK_ADMIN_PASSWORD`) are now Coolify [Magic Environment Variables](https://coolify.io/docs/knowledge-base/environment-variables#magic-environment-variables): in `docker-compose.yml` each `${VAR:?}` reference became `${SERVICE_PASSWORD_64_VAR}`, so Coolify auto-generates a strong 64-character value the first time the compose file is loaded instead of the operator inventing one. The `SERVICE_PASSWORD_64_*` (no-symbol) form was chosen deliberately because `PG_PASSWORD`/`KC_DB_PASSWORD` are embedded in `postgres://` and JDBC connection strings where a symbol would corrupt the URL. The container-facing env var names are unchanged, so `backup-config.sh`, `backup-db.sh`, and `1-init-keycloak-db.sh` still see the plain names.
+
+`RESTIC_PASSWORD` was deliberately **left** as a plain `${RESTIC_PASSWORD:?}` variable: it decrypts the backups, so a copy that exists only in Coolify (on the server the backups protect) is useless after a server loss — the operator must generate and store it independently. `configuration_options.md` documents a `python3 -c "import secrets; ..."` one-liner for it.
+
+Restore impact: magic vars generate on a fresh instance and will not match the backup, so `backup_and_restore_instructions.md` now instructs overwriting each generated `SERVICE_PASSWORD_64_*` with the value from the recovered `secrets.env` — matched by plain name — *before* the first deploy, otherwise `keycloak-import` bakes the wrong `OAUTH_CLIENT_SECRET` into the imported realm and login fails.
