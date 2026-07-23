@@ -91,7 +91,7 @@ How derivates are restored depends on `PICTURE_PROCESS_DERIVATES_STRATEGY`:
 
 ## 4. One-off backups
 
-The nightly schedule doesn't need to be the only way a backup runs. `backup-now.sh` runs all three jobs back-to-back, in the same order as the cron schedule (images, then db, then config — see §7 on why that order matters):
+The nightly schedule doesn't need to be the only way a backup runs. `backup-now.sh` runs all three jobs back-to-back, in the same order as the cron schedule (images, then db, then config — see §8 on why that order matters):
 
 ```bash
 docker exec <backup_container_name> backup-now.sh
@@ -196,7 +196,7 @@ Or take the portable route: skip the dump and start a clean Keycloak with an imp
 
 Once the dump is restored, redeploy the project so that `api`, `auth`, and `background-worker` pick up the restored data.
 
-If the restore target's domain differs from the original (true for any test restore per §7's quarterly-drill recommendation, and for a real disaster recovery onto a new domain) — fix the Keycloak `geovisio` client's Root URL, or login will fail with `Invalid parameter: redirect_uri`. `docker-compose.yml` templates the client's `rootUrl` from `GEOVISIO_BASE_URL` (`https://${DOMAIN}`) at realm-import time, but that only happens once, on the *original* instance — the resulting absolute URL is baked into the DB as literal text. The fresh realm import on this new deploy sets it correctly for the new domain, but the `pg_restore --clean --if-exists` you just ran overwrites the `keycloak` schema with the old backed-up realm data, reintroducing the original domain. `redirectUris` is stored as a relative path (`/api/auth/redirect`), so only `rootUrl` needs fixing:
+If the restore target's domain differs from the original (true for any test restore per §8's quarterly-drill recommendation, and for a real disaster recovery onto a new domain) — fix the Keycloak `geovisio` client's Root URL, or login will fail with `Invalid parameter: redirect_uri`. `docker-compose.yml` templates the client's `rootUrl` from `GEOVISIO_BASE_URL` (`https://${DOMAIN}`) at realm-import time, but that only happens once, on the *original* instance — the resulting absolute URL is baked into the DB as literal text. The fresh realm import on this new deploy sets it correctly for the new domain, but the `pg_restore --clean --if-exists` you just ran overwrites the `keycloak` schema with the old backed-up realm data, reintroducing the original domain. `redirectUris` is stored as a relative path (`/api/auth/redirect`), so only `rootUrl` needs fixing:
 
 Via Keycloak Admin Console (`<YOUR_INSTANCE_DOMAIN>/oauth`): Clients → `geovisio` → Root URL → set to `https://<new-domain>` → Save. Step 7's login check won't work until this is fixed.
 
@@ -305,7 +305,152 @@ Some steps to try:
 
 ---
 
-## 7. Operating notes
+## 7. Rotating secrets & credentials
+
+Use this when a secret is **compromised**, or when the set of authorized users changes and every credential must be re-issued as a precaution. This is not part of a normal restore — nothing is being recovered — but it is a "restore-like" action: you are replacing live secrets in place, and it reuses the same containers and credential-passing patterns as §6.
+
+**The core caveat:** for several secrets, editing the value in the Coolify **Environment Variables** UI is *not* enough. The secret was baked into a Postgres role, into the Keycloak realm, or into the encrypted restic repository at first boot, so changing only the env var makes the running copy and the stored copy silently drift apart — breaking logins, DB connections, or backups the next time the affected service restarts. The table below shows which secrets need extra handling.
+
+The five auto-generated secrets appear in the Coolify UI under their `SERVICE_PASSWORD_64_*` names (e.g. `OAUTH_CLIENT_SECRET` is edited as `SERVICE_PASSWORD_64_OAUTH_CLIENT_SECRET`) — the same mapping used in §6 step 2. `RESTIC_PASSWORD` and the S3 credentials are plain variables under their own names.
+
+As in §6, several steps run commands inside a container; see [running commands in Docker](./deployment_instructions.md#appendix-running-commands-in-docker) for finding the Coolify-suffixed container name.
+
+Wherever a step below asks for a new secret value (`<NEW_...>`), generate a strong random one the same way the deployment docs recommend for `RESTIC_PASSWORD`:
+
+```bash
+python3 -c "import secrets; print(secrets.token_urlsafe(64))"
+```
+
+Its output is URL-safe (only letters, digits, `-`, and `_`), so the same value is also safe to drop into the `postgres://` connection strings that carry `PG_PASSWORD` and `KC_DB_PASSWORD` (§7.3) without further escaping.
+
+| Secret (Coolify name)                                                    | Baked into                                              | Extra step beyond the env var?                                  |
+| ------------------------------------------------------------------------ | ------------------------------------------------------ | -------------------------------------------------------------- |
+| `FLASK_SECRET_KEY` (`SERVICE_PASSWORD_64_FLASK_SECRET_KEY`)              | nothing (runtime session-signing key)                  | **No** — env var + redeploy `api` (§7.1)                        |
+| `OAUTH_CLIENT_SECRET` (`SERVICE_PASSWORD_64_OAUTH_CLIENT_SECRET`)        | Keycloak `geovisio` client (realm import, one-time)    | **Yes** — update it in Keycloak *and* the env var, in sync (§7.2) |
+| `PG_PASSWORD` (`SERVICE_PASSWORD_64_PG_PASSWORD`)                        | Postgres `gvs` role (set at first DB init only)        | **Yes** — `ALTER USER gvs …` in the DB (§7.3)                   |
+| `KC_DB_PASSWORD` (`SERVICE_PASSWORD_64_KC_DB_PASSWORD`)                  | Postgres `keycloak_user` role (first DB init only)     | **Yes** — `ALTER USER keycloak_user …` in the DB (§7.3)         |
+| `KEYCLOAK_ADMIN_PASSWORD` (`SERVICE_PASSWORD_64_KEYCLOAK_ADMIN_PASSWORD`) | Keycloak master-realm admin user (first `auth` boot)   | **Yes** — reset inside Keycloak; env var alone does nothing (§7.4) |
+| `RESTIC_PASSWORD`                                                        | the encryption of the entire restic repo               | **Yes, critical** — re-key the repo *before* the env var (§7.5) |
+| Production S3 keys (in `FS_TMP_URL`/`FS_PERMANENT_URL`/`FS_DERIVATES_URL`) | nothing in the DB                                     | Rotate at vendor, update all three URLs (§7.6)                  |
+| Backup S3 keys (`BACKUP_S3_ACCESS_KEY`/`BACKUP_S3_SECRET_KEY`)           | nothing in the DB                                      | Rotate at vendor, update both vars (§7.6)                       |
+
+After **any** rotation, take a one-off backup (§7.7) — otherwise your newest backup still contains the *old* secrets.
+
+### 7.1 Env-var-only: `FLASK_SECRET_KEY`
+
+This is a pure runtime value (Flask uses it to sign session cookies) with nothing baked into the DB. Rotating it is just: edit `SERVICE_PASSWORD_64_FLASK_SECRET_KEY` in Coolify → redeploy `api`. Rotating it **invalidates every active session**, so all users are logged out and must sign in again — expected, and exactly what you want if a compromise is suspected.
+
+### 7.2 `OAUTH_CLIENT_SECRET` — must match on both sides
+
+This secret exists in two places that must stay identical: the `geovisio` client record inside Keycloak (baked into the `keycloak` schema when the realm was imported — the import runs `--override false`, so re-importing will **never** update it), and the `api` service's env var, which the API sends to Keycloak during the OAuth token exchange. If the two differ, login fails (token exchange is rejected).
+
+Update Keycloak **first**, then the env var:
+
+Via the Keycloak Admin Console (`<YOUR_INSTANCE_DOMAIN>/oauth`, master realm): Clients → `geovisio` → **Credentials** tab → **Regenerate** the secret (or paste a chosen value) → copy the resulting value.
+
+Or via `kcadm.sh`, reusing the pattern from §6 step 2:
+
+```bash
+docker exec -it <auth_container_name> sh -c '
+/opt/keycloak/bin/kcadm.sh config credentials --server http://localhost:8080 --realm master \
+  --user "$KEYCLOAK_ADMIN" --password "$KEYCLOAK_ADMIN_PASSWORD"
+CID=$(/opt/keycloak/bin/kcadm.sh get clients -r geovisio -q clientId=geovisio --fields id --format csv --noquotes | tail -1)
+/opt/keycloak/bin/kcadm.sh update clients/$CID -r geovisio -s "secret=<NEW_SECRET>"
+'
+```
+
+Then paste the **same** value into `SERVICE_PASSWORD_64_OAUTH_CLIENT_SECRET` in Coolify and redeploy `api`. Verify by logging in (as in §6 step 7).
+
+### 7.3 Postgres role passwords: `PG_PASSWORD` and `KC_DB_PASSWORD`
+
+Both are Postgres role passwords stored in the database. They are applied only at first DB initialisation — `gvs` from `POSTGRES_PASSWORD`, and `keycloak_user` from `1-init-keycloak-db.sh` — so changing the env var alone leaves the actual role password unchanged, and on the next restart the service can't connect. You must change the password **in the database first**, then update the env var to match, then redeploy the consumers.
+
+Change it in the DB (enter the *current* `PG_PASSWORD` if prompted):
+
+```bash
+# PG_PASSWORD — the gvs role (used in every DB_URL)
+docker exec -it <db_container_name> \
+  psql -U gvs -d geovisio -c "ALTER USER gvs WITH PASSWORD '<NEW_PG_PASSWORD>';"
+
+# KC_DB_PASSWORD — the keycloak_user role
+docker exec -it <db_container_name> \
+  psql -U gvs -d geovisio -c "ALTER USER keycloak_user WITH PASSWORD '<NEW_KC_DB_PASSWORD>';"
+```
+
+Then update the env var in Coolify (`SERVICE_PASSWORD_64_PG_PASSWORD` / `SERVICE_PASSWORD_64_KC_DB_PASSWORD`) to the **exact** same value, and redeploy the services that use it:
+
+- `PG_PASSWORD`: everything with `DB_URL` — `api`, all `background-worker-*`, `migrations` — plus the `backup` service (which also carries `PG_PASSWORD` for `pg_dump`).
+- `KC_DB_PASSWORD`: `auth`, `keycloak-export`, `keycloak-import` — plus the `backup` service (it carries this value for the config backup) and the `db` service.
+
+The simplest correct approach is to update the value and redeploy the whole stack, so every consumer picks it up together. A mismatch between the DB and the env var surfaces as connection failures in the affected containers' logs.
+
+### 7.4 `KEYCLOAK_ADMIN_PASSWORD`
+
+The Keycloak master-realm admin password is bootstrapped into the DB the first time `auth` starts (from `KC_BOOTSTRAP_KEYCLOAK_ADMIN_PASSWORD`) and then hashed and stored. Changing the env var afterward has **no effect** on the stored password — you must reset it inside Keycloak.
+
+Via the Keycloak Admin Console (master realm): Users → the admin user (`admin` by default) → **Credentials** → **Reset password** → set a new one (untick "Temporary").
+
+Or via `kcadm.sh`:
+
+```bash
+docker exec -it <auth_container_name> sh -c '
+/opt/keycloak/bin/kcadm.sh config credentials --server http://localhost:8080 --realm master \
+  --user "$KEYCLOAK_ADMIN" --password "$KEYCLOAK_ADMIN_PASSWORD"
+/opt/keycloak/bin/kcadm.sh set-password -r master --username "$KEYCLOAK_ADMIN" --new-password "<NEW_ADMIN_PASSWORD>"
+'
+```
+
+Then update `SERVICE_PASSWORD_64_KEYCLOAK_ADMIN_PASSWORD` in Coolify to the same value — not because the running `auth` service needs it (it doesn't re-read it), but so it stays correct for the `backup` service's `secrets.env` and for any future fresh deploy. (`KEYCLOAK_ADMIN`, the admin *username*, is a plain variable you can likewise change here if desired.)
+
+### 7.5 `RESTIC_PASSWORD` — re-key the repo, do **not** just swap the variable
+
+`RESTIC_PASSWORD` is the key that decrypts the entire restic repository. **Do not** simply change the env var: the existing repo is still encrypted with the old password, so the `backup` container would no longer be able to open it and *every* nightly backup and *every* restore would fail. Instead, add a new key to the existing repo, verify it works, remove the old one, and only then change the env var. Restic keys are repository-level, so a new key grants access to **all** existing snapshots — no history is lost.
+
+From inside the `backup` container (it already has `restic` configured against the repo via its env):
+
+```bash
+docker exec -it <backup_container_name> sh
+
+# See the current keys
+restic key list
+
+# Add a new key; restic prompts for the NEW password (twice).
+# (This authenticates using the current RESTIC_PASSWORD already in the container's env.)
+restic key add
+
+# Confirm the new password opens the repo, then remove the OLD key by its ID from `restic key list`.
+restic key remove <OLD_KEY_ID>
+```
+
+(`restic key passwd` does the add-then-remove in one step if you prefer.) Only **after** the repo is re-keyed, update `RESTIC_PASSWORD` in Coolify to the new value and redeploy `backup`. Finally, update the copy stored in your password manager and with the external drive's offline notes (per §5) — that copy is the only way to decrypt the backups if the server is lost.
+
+### 7.6 S3 bucket credentials
+
+For issuing new keys and revoking the old ones, **follow your S3 vendor's process** — this varies by provider. Below are only the instance-side updates needed so Panoramax keeps working with the new keys. As a safety rule, revoke the old keys at the vendor **only after** confirming the instance works with the new ones (a redeploy plus a successful one-off backup, §7.7) — otherwise a typo locks the instance out of its own storage.
+
+**Production buckets.** The production S3 credentials are embedded *inside* the storage URLs rather than passed as separate variables. The same access key and secret appear in **all three** of `FS_TMP_URL`, `FS_PERMANENT_URL`, and `FS_DERIVATES_URL`, in the form:
+
+```
+s3://ACCESS_KEY:SECRET_KEY@bucket/prefix?endpoint_url=<url-encoded-endpoint>&region=<region>
+```
+
+Update the `ACCESS_KEY:SECRET_KEY` portion in **each of the three** variables (see the URL format in [`configuration_options.md`](./configuration_options.md)). If the new secret contains URL-special characters (`:`, `/`, `@`, `?`, `&`, `%`, …), **percent-encode** it, or the URL will parse wrong. Then redeploy `api`, all `background-worker-*`, **and** `backup` — the `backup` service reuses `FS_PERMANENT_URL` to sync images each night, so a stale value there silently breaks the nightly image copy.
+
+**Backup bucket.** Update `BACKUP_S3_ACCESS_KEY` and `BACKUP_S3_SECRET_KEY` in Coolify and redeploy `backup`. Both restic (which reads them as `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`) and rclone read them at runtime, so no repo reconfiguration is required. This is independent of `RESTIC_PASSWORD` and the repo's encryption — rotating the S3 keys does not touch the backup contents. (If you keep an HDD copy per §5, update the same keys in that offline note too.)
+
+### 7.7 After rotating: take a one-off backup
+
+The nightly config backup serialises the five auto-generated secrets into an encrypted `secrets.env`, and the DB dump captures the Postgres role password hashes and Keycloak credentials. Until a fresh backup runs, your most recent snapshot still holds the **old** secrets — so a restore from it would bring the old values back and, worse, wouldn't match a repo you just re-keyed. After rotating, run a one-off backup (see §4):
+
+```bash
+docker exec <backup_container_name> backup-now.sh
+```
+
+At minimum run `backup-config.sh` (refreshes `secrets.env`), plus `backup-db.sh` whenever you changed a Postgres role password or a Keycloak secret so the dump reflects the new hashes. Note that a config/db backup written *after* a `RESTIC_PASSWORD` re-key is encrypted under the new key — make sure the new password is the one saved in your password manager.
+
+---
+
+## 8. Operating notes
 
 - **Sequence within a night:** images run first (02:00), DB second (02:30). A picture uploaded in between is captured next night; on restore, any DB row whose file isn't present yet is harmless and clears on the next cycle. Perfect point-in-time consistency isn't needed because picture files are immutable.
 - **Important! Test that you can restore before you _need_ to restore!!** Do a real restore into a scratch project at least quarterly, and after any major Panoramax or Keycloak upgrade (PostGIS/Keycloak schema versions must match between dump and restore target). Run `restic check` weekly.
