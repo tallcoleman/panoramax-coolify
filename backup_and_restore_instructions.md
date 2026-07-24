@@ -132,10 +132,14 @@ Both prefixes copy down cleanly using rclone connection strings (substitute your
 BACKUP=":s3,provider=Other,access_key_id=${BACKUP_S3_ACCESS_KEY},secret_access_key=${BACKUP_S3_SECRET_KEY},endpoint='${BACKUP_S3_ENDPOINT}',region='${BACKUP_S3_REGION}':${BACKUP_S3_BUCKET}"
 
 # Encrypted DB/secrets: copy the restic repo, or use restic's native repo-to-repo copy.
-rclone sync "$BACKUP/restic" /mnt/hdd/panoramax/restic
+rclone sync "$BACKUP/restic" /mnt/hdd/panoramax/restic \
+  --transfers 16 --checkers 32 --fast-list --progress
 # Images: plain, directly browsable.
-rclone sync "$BACKUP/images" /mnt/hdd/panoramax/images
+rclone sync "$BACKUP/images" /mnt/hdd/panoramax/images \
+  --transfers 16 --checkers 32 --fast-list --progress
 ```
+
+`--fast-list` lists the S3 source in bulk (fewer API calls, faster on large buckets — biggest win for `images`), `--checkers 32` parallelises the source-vs-destination compare (biggest win for the many small immutable pack files in `restic`), and `--transfers 16` parallelises the actual transfers — the same tuning the nightly `backup-images.sh` uses. `--progress` shows a live transfer/ETA display; drop it for unattended/cron runs.
 
 For the HDD, keep the images unencrypted (as above) so the drive is directly browsable, but the DB/secrets live in an encrypted restic repo. That means the HDD copy of the DB is useless without the `RESTIC_PASSWORD` and backup S3 keys. Store those credentials with the drive (offline) and in a password manager.
 
