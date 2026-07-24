@@ -87,7 +87,12 @@ SMTP variables (`SMTP_HOST`, `SMTP_FROM`, `SMTP_USER`, `SMTP_PASSWORD`) are left
 
 ---
 
-## Backup runbook added
+## Faster shutdown / redeploys
+
+Stopping the stack (and the "Removing old containers" step of a Coolify redeploy) took several minutes because several containers ignored `SIGTERM` and sat out Docker's full default 10s grace period before being `SIGKILL`ed — and Coolify walks the containers, so those 10s waits stacked up.
+
+- **`stop_grace_period` added to safe-to-kill services** — `keycloak-export` (`1s`), the `background-worker` anchor (`2s`, inherited by all four workers), and `website` (`2s`). Picture jobs live in a DB-backed queue so a mid-picture kill is safe (the row stays pending and is reprocessed on restart); the export sidecar and the stateless website have nothing to flush. `api` (lets gunicorn drain in-flight requests), `db`, `auth`, `reverseproxy`, and `backup` keep the default grace period.
+- **`keycloak-export-loop.sh` now traps `SIGTERM`/`SIGINT`** — as PID 1 a shell blocked in a foreground `sleep` never saw the signal, guaranteeing a full grace-period wait on every stop. It now traps the signal and runs the sleep as `sleep … & wait $!` so shutdown interrupts it and the container exits immediately.
 
 `BACKUP.md` — comprehensive runbook for backing up a production Panoramax instance to Backblaze B2, covering:
 - PostgreSQL dumps (geovisio + keycloak schemas) encrypted with restic

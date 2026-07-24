@@ -125,6 +125,10 @@ services:
     <<: *keycloak-build
     entrypoint: ["/usr/local/bin/keycloak-export-loop.sh"]
     restart: unless-stopped
+    # Pure sidecar with nothing to flush on shutdown: kill it fast instead of
+    # letting Docker wait out the default 10s grace period (its own loop also
+    # traps SIGTERM — see keycloak-export-loop.sh — this just caps the worst case).
+    stop_grace_period: 1s
     exclude_from_hc: true
     labels:
       - "traefik.enable=false"
@@ -222,6 +226,9 @@ services:
 
   website:
     image: panoramax/website:${WEBSITE_IMAGE_TAG:-latest}
+    # Stateless front end; if PID 1 is an npm/shell wrapper it won't forward
+    # SIGTERM to node, so it would otherwise sit out the full 10s grace period.
+    stop_grace_period: 2s
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:3000 || exit 1"]
       interval: 10s
@@ -251,6 +258,11 @@ services:
   background-worker-1: &worker-default
     <<: *geovisio-default
     command: picture-worker
+    # Picture jobs live in a DB-backed queue, so a mid-picture kill is safe —
+    # the row stays pending and is reprocessed on restart. Cap the shutdown wait
+    # instead of letting a worker hold the whole stack for up to 10s (×4 workers)
+    # while it finishes an in-flight picture during a redeploy.
+    stop_grace_period: 2s
     exclude_from_hc: true
     labels:
       - "traefik.enable=false"
