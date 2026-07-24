@@ -175,8 +175,12 @@ services:
     labels:
       - "traefik.enable=false"
     # reverseproxy (the API's only ingress) is stopped well before api during a
-    # redeploy, so there are no in-flight external requests left to drain — don't
-    # let gunicorn sit out its full ~30s graceful timeout on the way down.
+    # redeploy, so there are no in-flight external requests left to drain, and api
+    # ignores SIGTERM anyway (dies at the grace ceiling every redeploy). SIGKILL
+    # it up front; a killed DB transaction rolls back and orphaned temp uploads
+    # are handled by the existing orphan-prune. See the worker anchor above for
+    # why stop_signal (not stop_grace_period) is the effective knob under Coolify.
+    stop_signal: SIGKILL
     stop_grace_period: 5s
     depends_on:
       db:
@@ -263,9 +267,13 @@ services:
     <<: *geovisio-default
     command: picture-worker
     # Picture jobs live in a DB-backed queue, so a mid-picture kill is safe —
-    # the row stays pending and is reprocessed on restart. Cap the shutdown wait
-    # instead of letting a worker hold the whole stack for up to 10s (×4 workers)
-    # while it finishes an in-flight picture during a redeploy.
+    # the row stays pending and is reprocessed on restart. The worker process
+    # ignores SIGTERM (observed dying at the grace ceiling every redeploy, always
+    # SIGKILLed), so send SIGKILL up front and skip the pointless wait. Coolify's
+    # "Stop Grace Period" overrides stop_grace_period but not stop_signal, so this
+    # is the effective knob under Coolify; the 2s below only applies to a plain
+    # `docker compose` teardown.
+    stop_signal: SIGKILL
     stop_grace_period: 2s
     exclude_from_hc: true
     labels:
