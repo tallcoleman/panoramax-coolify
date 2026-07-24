@@ -30,7 +30,7 @@ Two prefixes are used inside the backup bucket: `restic/` (Postgres dumps, Keycl
 
 Create an access key scoped to that bucket, and note the access key ID, secret key, endpoint URL, and region (if applicable).
 
-Turn on **Object Versioning** and add a **Lifecycle rule** such as *"keep prior/hidden versions for 30 days"*. Because the backup service uses `rclone copy` (additive), a picture deleted in production stays in the backup; versioning is a second safety net if you later switch to `sync`.
+Turn on **Object Versioning** and add a **Lifecycle rule** such as *"keep prior/hidden versions for 30 days"*. The backup service uses `rclone sync`, so the backup mirrors production: a picture deleted in production is removed from the backup on the next nightly run. **Versioning + the 30-day lifecycle rule is your safety net** — a deleted picture's prior version stays recoverable for 30 days. Want a longer or permanent safety net? Extend the lifecycle window, or switch the backup to additive by changing `sync` to `copy` in [`backup/backup-images.sh`](./docker/full-keycloak-auth/backup/backup-images.sh) (additive never deletes from the backup).
 
 > **Record the restic password (see step 4) and backup S3 keys somewhere independent of the server** (password manager, and on the external drive's notes). You cannot restore an encrypted restic repo without them.
 

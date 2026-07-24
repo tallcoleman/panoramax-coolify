@@ -32,7 +32,7 @@ Panoramax splits picture storage into `permanent` (irreplaceable originals) and 
 Two tools, both running on a nightly schedule inside a single `backup` sidecar container:
 
 - **`restic`** ships the Postgres dumps, Keycloak export, and secrets/config. Encrypted (since some of the data contains credentials), deduplicated, snapshotted, with retention applied automatically.
-- **`rclone`** ships the images (production S3 → backup S3), transferring only new pictures after the first run and never deleting from the backup.
+- **`rclone`** ships the images (production S3 → backup S3). It runs `sync`, so the backup is an exact mirror of production's permanent bucket: only changed pictures transfer, and a picture deleted in production is removed from the backup on the next run. The backup bucket's object versioning + 30-day lifecycle rule (see [deployment_instructions.md §2.1](./deployment_instructions.md#21-backup-bucket-details)) is the safety net for accidental deletions. To instead keep deleted pictures in the backup indefinitely, change `sync` to `copy` (additive) in `backup/backup-images.sh`.
 
 Because Keycloak stores its tables in a `keycloak` schema inside the shared `geovisio` database, a single database dump covers both the API and Keycloak. A separate portable realm export is also taken as a safety net.
 
@@ -106,6 +106,21 @@ docker exec <backup_container_name> backup-now.sh
 Like the individual scripts, it uses `set -eu` with no error suppression, so it stops at the first failing step rather than continuing on to the next. It doesn't touch the container's cron schedule — it's purely an extra, manually-invoked entrypoint alongside the automated one. Useful before/after a risky change, or to validate the backup pipeline without waiting for 2am.
 
 You can also run the three jobs individually: `backup-images.sh`, `backup-db.sh`, `backup-config.sh`.
+
+### 4.1 Pruning orphaned production images
+
+An *orphan* is an HD file still in the production permanent bucket with no matching row in the `pictures` table — usually left behind by an interrupted or failed delete. Because the image backup runs `sync` (§1), orphans would otherwise be mirrored into the backup and occupy space there too. `prune-orphan-images.sh` reconciles the production permanent bucket against the database and removes them.
+
+It is **manual and dry-run by default** — it lists what it would delete and removes nothing until you pass `--delete`. It refuses to run if the `pictures` table is empty, and aborts if more than half the bucket looks orphaned (override with `--force`).
+
+```bash
+# Preview orphaned HD files (no deletion):
+docker exec <backup_container_name> prune-orphan-images.sh
+# Actually delete them from production:
+docker exec <backup_container_name> prune-orphan-images.sh --delete
+```
+
+It touches only production; the next `backup-images.sh` (`sync`) run mirrors the deletions into the backup, where the 30-day object-versioning window remains the safety net.
 
 ---
 

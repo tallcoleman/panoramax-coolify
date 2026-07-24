@@ -20,11 +20,16 @@ SRC_REGION=$(echo "$query" | sed -n 's/.*region=\([^&]*\).*/\1/p')
 SRC=":s3,provider=Other,access_key_id=${SRC_ACCESS_KEY},secret_access_key=${SRC_SECRET_KEY},endpoint='${SRC_ENDPOINT}',region='${SRC_REGION}':${SRC_BUCKET_PATH}"
 DST=":s3,provider=Other,access_key_id=${BACKUP_S3_ACCESS_KEY},secret_access_key=${BACKUP_S3_SECRET_KEY},endpoint='${BACKUP_S3_ENDPOINT}',region='${BACKUP_S3_REGION}':${BACKUP_S3_BUCKET}/images/permanent"
 
-# 'copy' is additive: it never deletes from the backup, so originals removed in
-# production are retained. Swap to 'sync' only if you want an exact mirror.
+# 'sync' (default) makes the backup an exact mirror of production's permanent
+# bucket: a picture removed in production is removed from the backup on the next
+# run. The backup bucket's object-versioning + 30-day lifecycle rule is the
+# safety net for accidental deletions (see deployment_instructions.md §2.1).
+# To keep deleted pictures in the backup indefinitely, change 'sync' to 'copy'
+# below (additive: never deletes from the backup) — and/or lengthen the backup
+# bucket's retention window.
 # -v is required for rclone to print the final transfer stats at all — at the
 # default NOTICE log level a clean run is otherwise completely silent.
-rclone copy "$SRC" "$DST" \
+rclone sync "$SRC" "$DST" \
   --transfers 16 --checkers 32 --fast-list --stats-one-line -v
 
 # Success marker for the container healthcheck (§7.3).
