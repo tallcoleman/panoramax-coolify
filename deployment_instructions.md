@@ -32,7 +32,7 @@ Create an access key scoped to that bucket, and note the access key ID, secret k
 
 Turn on **Object Versioning** and add a **Lifecycle rule** such as *"keep prior/hidden versions for 30 days"*. Because the backup service uses `rclone copy` (additive), a picture deleted in production stays in the backup; versioning is a second safety net if you later switch to `sync`.
 
-> **Record the restic password and backup S3 keys somewhere independent of the server** (password manager, and on the external drive's notes). You cannot restore an encrypted restic repo without them.
+> **Record the restic password (see step 4) and backup S3 keys somewhere independent of the server** (password manager, and on the external drive's notes). You cannot restore an encrypted restic repo without them.
 
 > **Alternative backends.** The backup scripts use the generic S3 API on both ends, but rclone also has native remote types for other object stores — e.g. `b2:` for Backblaze B2 (its native API, rather than B2's S3-compatible endpoint) or a `[swift]` remote for OpenStack Swift. The script structure stays the same; just swap the `:s3,...:` connection string for `:b2,account=...,key=...:` or a configured `swift:` remote. Not covered in detail here.
 

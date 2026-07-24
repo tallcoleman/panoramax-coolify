@@ -16,14 +16,14 @@ For details of how the backup code itself works, see [`backup_architecture.md`](
 
 Here is the data used and needed for a functioning application:
 
-| Data                                                                                                                                                                                                       | Where it lives                                         | Replaceable?                    | Back up?            |
-| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ | ------------------------------- | ------------------- |
-| **Postgres `geovisio` DB** (PostGIS) — all metadata: accounts, collections, sequences, picture records + their file paths, semantics, `configurations` (live settings), TOS pages, excluded areas, reports | `db` service                                           | ❌ No                            | ✅ **Yes**           |
+| Data                                                                                                                                                                                                       | Where it lives                                           | Replaceable?                    | Back up?            |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- | ------------------------------- | ------------------- |
+| **Postgres `geovisio` DB** (PostGIS) — all metadata: accounts, collections, sequences, picture records + their file paths, semantics, `configurations` (live settings), TOS pages, excluded areas, reports | `db` service                                             | ❌ No                            | ✅ **Yes**           |
 | **Keycloak data** — realm config, clients, **users + password hashes**                                                                                                                                     | Postgres `geovisio` DB, in a dedicated `keycloak` schema | ❌ No                            | ✅ **Yes**           |
-| **Permanent (HD) pictures** — the original, already-blurred, high-definition files                                                                                                                         | S3 (`FS_PERMANENT_URL`)                                | ❌ No                            | ✅ **Yes**           |
-| **Derivates** — SD, thumbnail, and 360° tiles                                                                                                                                                              | S3 (`FS_DERIVATES_URL`)                                | ✅ **Yes — regenerated from HD** | 🚫 **Skip** (see §3) |
-| **`tmp/`** — pictures mid-blur                                                                                                                                                                             | S3 (`FS_TMP_URL`) or disk                              | ✅ Transient                     | 🚫 Skip              |
-| **Secrets & config** — Coolify env vars (secrets), `docker-compose.yml`, `keycloak-realm.json`, custom themes                                                                                              | Coolify UI + your repo                                 | ❌ No (secrets)                  | ✅ **Yes**           |
+| **Permanent (HD) pictures** — the original, already-blurred, high-definition files                                                                                                                         | S3 (`FS_PERMANENT_URL`)                                  | ❌ No                            | ✅ **Yes**           |
+| **Derivates** — SD, thumbnail, and 360° tiles                                                                                                                                                              | S3 (`FS_DERIVATES_URL`)                                  | ✅ **Yes — regenerated from HD** | 🚫 **Skip** (see §3) |
+| **`tmp/`** — pictures mid-blur                                                                                                                                                                             | S3 (`FS_TMP_URL`) or disk                                | ✅ Transient                     | 🚫 Skip              |
+| **Secrets & config** — Coolify env vars (secrets), `docker-compose.yml`, `keycloak-realm.json`, custom themes                                                                                              | Coolify UI + your repo                                   | ❌ No (secrets)                  | ✅ **Yes**           |
 
 Panoramax splits picture storage into `permanent` (irreplaceable originals) and `derivates` (a disposable cache). The CLI even has `panoramax_backend cleanup --cache` whose only job is to delete derivates — they are explicitly throwaway. Regeneration is covered in §3.
 
@@ -72,6 +72,12 @@ docker exec <db_container_name> \
 The healthcheck has a 26-hour start period, so a freshly deployed instance will not report healthy until the first night's runs have completed. Nothing else depends on this container, so an unhealthy `backup` service never blocks the rest of the stack.
 
 **Verify the snapshots actually landed** by listing them from any machine with restic installed (see §6 step 1 for the credential-passing pattern), or wait for the weekly `restic-check.sh` integrity check.
+
+You can also run restic check at any time with:
+
+```bash
+docker exec <backup_container_name> restic-check.sh
+```
 
 ---
 
@@ -176,10 +182,21 @@ For the `psql` and `pg_restore` command below, enter the value for the `PG_PASSW
 ```bash
 # roles (if the gvs role isn't already created by the image)
 psql -h db -U gvs -d postgres -f /tmp/restore/backups/pg/globals.sql   
-# ignore "already exists"
 ```
 
-Restore the `geovisio` database, which includes the data for the api and for keycloak (each lives in a specific schema within the database).
+Expected output will be something like (ignore the "already exists" messages):
+
+```bash
+SET
+SET
+SET
+psql:/tmp/restore/backups/pg/globals.sql:16: ERROR:  role "gvs" already exists
+ALTER ROLE
+psql:/tmp/restore/backups/pg/globals.sql:18: ERROR:  role "keycloak_user" already exists
+ALTER ROLE
+```
+
+Restore the `geovisio` database, which includes the data for the api and for keycloak (each lives in a specific schema within the database). You will see a lot of output for this command as it restores the database.
 
 ```bash
 # geovisio — schema already exists (created by the migrations service), so overwrite it
@@ -198,7 +215,10 @@ Once the dump is restored, redeploy the project so that `api`, `auth`, and `back
 
 If the restore target's domain differs from the original (true for any test restore per §8's quarterly-drill recommendation, and for a real disaster recovery onto a new domain) — fix the Keycloak `geovisio` client's Root URL, or login will fail with `Invalid parameter: redirect_uri`. `docker-compose.yml` templates the client's `rootUrl` from `GEOVISIO_BASE_URL` (`https://${DOMAIN}`) at realm-import time, but that only happens once, on the *original* instance — the resulting absolute URL is baked into the DB as literal text. The fresh realm import on this new deploy sets it correctly for the new domain, but the `pg_restore --clean --if-exists` you just ran overwrites the `keycloak` schema with the old backed-up realm data, reintroducing the original domain. `redirectUris` is stored as a relative path (`/api/auth/redirect`), so only `rootUrl` needs fixing:
 
-Via Keycloak Admin Console (`<YOUR_INSTANCE_DOMAIN>/oauth`): Clients → `geovisio` → Root URL → set to `https://<new-domain>` → Save. Step 7's login check won't work until this is fixed.
+Via Keycloak Admin Console (`<YOUR_INSTANCE_DOMAIN>/oauth`): 
+
+- Manage realms -> geovisio; then
+- Clients → `geovisio` → Root URL → set to `https://<new-domain>` → Save. Step 7's login check won't work until this is fixed.
 
 Alternatively, you can do it via command:
 
@@ -213,9 +233,7 @@ CID=$(/opt/keycloak/bin/kcadm.sh get clients -r geovisio -q clientId=geovisio --
 
 ### 3. Restore images.
 
-Repopulate production S3 from the backup S3 (or point the instance at the backup S3 temporarily), using the same connection-string style as §5:
-
-Like with before, remember that the BACKUP var should point to the backup files you are loading from the old instance, not the backup S3 for the new instance (if they are different).
+Repopulate production S3 from the backup S3 (or point the instance at the backup S3 temporarily), using the same connection-string style as §5 (example below). Like with before, remember that the BACKUP var should point to the backup files you are loading from the old instance, not the backup S3 for the new instance (if they are different).
 
 If your provider does not need region specified (e.g. if region is in the endpoint URL), then remove `,region='<BACKUP_S3_REGION>'` and `,region='<NEW_PROD_REGION>'` from the two connection strings below.
 
@@ -228,7 +246,7 @@ PROD=":s3,provider=Other,access_key_id=<NEW_PROD_ACCESS_KEY>,secret_access_key=<
 
 rclone copy "$BACKUP" "$PROD" --transfers 16 --s3-acl public-read --fast-list --progress
 ```
-Leave `derivates/` and `tmp/` empty.
+Leave `derivates/` and `tmp/` empty. This command may take a long time to run, but it will provide you with an ETA, and nothing bad will happen if you stop it with `Ctrl + C` and start it again later. (In the worst case, it will quickly check all the images it has already transferred before getting to the ones that still need transferring.)
 
 If you accidentally restore to the wrong prefix, you can fix it with an in-place `rclone move`:
 
@@ -291,7 +309,7 @@ docker exec <db-container-name> \
   psql -U gvs -d geovisio -Atc "SELECT count(*) FROM job_queue;"
 ```
 
-It should reach 0 over the next few minutes (check `background-worker-*` logs if it stalls).
+Even with the four picture workers in this compose file working in parallel, this may take 3-4 times as long as the rsync to copy over the originals. You can also check the `background-worker-*` container logs to check in case something has gotten stalled.
 
 ### 7. Verify:
 
@@ -299,6 +317,7 @@ Some steps to try:
 
 - `curl --fail https://<your-domain>/api`
 - log in via Keycloak (confirms the `keycloak` DB/realm restored and `OAUTH_CLIENT_SECRET` still matches)
+- Run a one-off backup (see section 4)
 - open a picture (confirms HD present + derivate regeneration)
 - spot-check collection/picture counts against expectations
 - try uploading new images via the panoramax_cli tool
@@ -323,16 +342,16 @@ python3 -c "import secrets; print(secrets.token_urlsafe(64))"
 
 Its output is URL-safe (only letters, digits, `-`, and `_`), so the same value is also safe to drop into the `postgres://` connection strings that carry `PG_PASSWORD` and `KC_DB_PASSWORD` (§7.3) without further escaping.
 
-| Secret (Coolify name)                                                    | Baked into                                              | Extra step beyond the env var?                                  |
-| ------------------------------------------------------------------------ | ------------------------------------------------------ | -------------------------------------------------------------- |
-| `FLASK_SECRET_KEY` (`SERVICE_PASSWORD_64_FLASK_SECRET_KEY`)              | nothing (runtime session-signing key)                  | **No** — env var + redeploy `api` (§7.1)                        |
-| `OAUTH_CLIENT_SECRET` (`SERVICE_PASSWORD_64_OAUTH_CLIENT_SECRET`)        | Keycloak `geovisio` client (realm import, one-time)    | **Yes** — update it in Keycloak *and* the env var, in sync (§7.2) |
-| `PG_PASSWORD` (`SERVICE_PASSWORD_64_PG_PASSWORD`)                        | Postgres `gvs` role (set at first DB init only)        | **Yes** — `ALTER USER gvs …` in the DB (§7.3)                   |
-| `KC_DB_PASSWORD` (`SERVICE_PASSWORD_64_KC_DB_PASSWORD`)                  | Postgres `keycloak_user` role (first DB init only)     | **Yes** — `ALTER USER keycloak_user …` in the DB (§7.3)         |
-| `KEYCLOAK_ADMIN_PASSWORD` (`SERVICE_PASSWORD_64_KEYCLOAK_ADMIN_PASSWORD`) | Keycloak master-realm admin user (first `auth` boot)   | **Yes** — reset inside Keycloak; env var alone does nothing (§7.4) |
-| `RESTIC_PASSWORD`                                                        | the encryption of the entire restic repo               | **Yes, critical** — re-key the repo *before* the env var (§7.5) |
-| Production S3 keys (in `FS_TMP_URL`/`FS_PERMANENT_URL`/`FS_DERIVATES_URL`) | nothing in the DB                                     | Rotate at vendor, update all three URLs (§7.6)                  |
-| Backup S3 keys (`BACKUP_S3_ACCESS_KEY`/`BACKUP_S3_SECRET_KEY`)           | nothing in the DB                                      | Rotate at vendor, update both vars (§7.6)                       |
+| Secret (Coolify name)                                                      | Baked into                                           | Extra step beyond the env var?                                     |
+| -------------------------------------------------------------------------- | ---------------------------------------------------- | ------------------------------------------------------------------ |
+| `FLASK_SECRET_KEY` (`SERVICE_PASSWORD_64_FLASK_SECRET_KEY`)                | nothing (runtime session-signing key)                | **No** — env var + redeploy `api` (§7.1)                           |
+| `OAUTH_CLIENT_SECRET` (`SERVICE_PASSWORD_64_OAUTH_CLIENT_SECRET`)          | Keycloak `geovisio` client (realm import, one-time)  | **Yes** — update it in Keycloak *and* the env var, in sync (§7.2)  |
+| `PG_PASSWORD` (`SERVICE_PASSWORD_64_PG_PASSWORD`)                          | Postgres `gvs` role (set at first DB init only)      | **Yes** — `ALTER USER gvs …` in the DB (§7.3)                      |
+| `KC_DB_PASSWORD` (`SERVICE_PASSWORD_64_KC_DB_PASSWORD`)                    | Postgres `keycloak_user` role (first DB init only)   | **Yes** — `ALTER USER keycloak_user …` in the DB (§7.3)            |
+| `KEYCLOAK_ADMIN_PASSWORD` (`SERVICE_PASSWORD_64_KEYCLOAK_ADMIN_PASSWORD`)  | Keycloak master-realm admin user (first `auth` boot) | **Yes** — reset inside Keycloak; env var alone does nothing (§7.4) |
+| `RESTIC_PASSWORD`                                                          | the encryption of the entire restic repo             | **Yes, critical** — re-key the repo *before* the env var (§7.5)    |
+| Production S3 keys (in `FS_TMP_URL`/`FS_PERMANENT_URL`/`FS_DERIVATES_URL`) | nothing in the DB                                    | Rotate at vendor, update all three URLs (§7.6)                     |
+| Backup S3 keys (`BACKUP_S3_ACCESS_KEY`/`BACKUP_S3_SECRET_KEY`)             | nothing in the DB                                    | Rotate at vendor, update both vars (§7.6)                          |
 
 After **any** rotation, take a one-off backup (§7.7) — otherwise your newest backup still contains the *old* secrets.
 
@@ -453,6 +472,6 @@ At minimum run `backup-config.sh` (refreshes `secrets.env`), plus `backup-db.sh`
 ## 8. Operating notes
 
 - **Sequence within a night:** images run first (02:00), DB second (02:30). A picture uploaded in between is captured next night; on restore, any DB row whose file isn't present yet is harmless and clears on the next cycle. Perfect point-in-time consistency isn't needed because picture files are immutable.
-- **Important! Test that you can restore before you _need_ to restore!!** Do a real restore into a scratch project at least quarterly, and after any major Panoramax or Keycloak upgrade (PostGIS/Keycloak schema versions must match between dump and restore target). Run `restic check` weekly.
+- **Important! Test that you can restore before you _need_ to restore!!** Do a real restore into a scratch project at least quarterly, and after any major Panoramax or Keycloak upgrade (PostGIS/Keycloak schema versions must match between dump and restore target). Run `docker exec <backup_container_name> restic-check.sh` weekly.
 - **Retention** defaults to 7 daily / 5 weekly / 12 monthly, overridable via `RESTIC_KEEP_DAILY`/`RESTIC_KEEP_WEEKLY`/`RESTIC_KEEP_MONTHLY` — tune to taste. Images rely on `rclone copy` (additive) plus the backup S3 bucket's versioning/lifecycle rule.
 - **Schedule** defaults to 02:00/02:30/02:45 nightly with a weekly integrity check, overridable via `BACKUP_CRON_IMAGES`/`BACKUP_CRON_DB`/`BACKUP_CRON_CONFIG`/`BACKUP_CRON_CHECK` — keep images before DB if you change them, since the point-in-time reasoning above depends on that order.
